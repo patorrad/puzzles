@@ -1,6 +1,12 @@
 """
 Planners for the bin-clearing task.
 
+Parallel planner
+----------------
+ParallelMCTSPusher — wraps MCTSPusher with a ParallelBinEnv so that
+all children in _expand() and all rollouts in _rollout() are evaluated
+simultaneously on the GPU via a single scene.step() per physics tick.
+
 Both planners treat the Genesis simulation as a black-box forward model.
 State save/restore is done via env.get_state() / env.set_state().
 
@@ -27,63 +33,62 @@ from typing import Optional
 from env import BinEnv, BIN_W, BIN_D, EXIT_Y, OBJ_SIZE
 
 
-# Push directions: N, NE, E, SE, NW, W — excluding southward (pull handles that)
-_PUSH_ANGLES = [a for a in np.linspace(0, 2 * np.pi, 8, endpoint=False)
-                if np.sin(a) > -0.5]   # drop pure-south and nearby directions
-DISCRETE_DIRS = np.stack([np.cos(_PUSH_ANGLES), np.sin(_PUSH_ANGLES)], axis=1)
-
-# Probability of choosing a pull action instead of a push
-_PULL_PROB = 0.35
+# Action types and their sampling weights (bias_toward_exit=True)
+# pull_s gets highest weight since it directly moves target to exit
+_ACTION_TYPES  = ['push_n', 'pull_s', 'push_e', 'push_w']
+_WEIGHTS_BIASED = np.array([0.45, 0.45, 0.05, 0.05])
+_WEIGHTS_FLAT   = np.array([0.25, 0.25, 0.25, 0.25])
 
 
 def _execute_action(env: BinEnv, action: dict) -> tuple[dict, float, bool]:
-    """Dispatch a sampled action to execute_push or execute_pull."""
-    if action.get('action_type') == 'pull':
-        return env.execute_pull(action['push_pos'], pull_z=action.get('push_z'))
-    return env.execute_push(
-        action['push_pos'], action['push_dir'], push_z=action.get('push_z')
-    )
+    """Dispatch a sampled action to the appropriate env method."""
+    atype = action['action_type']
+    pos   = action['push_pos']
+    z     = action['push_z']
+    if atype == 'push_n':
+        return env.execute_ns_push(pos, z)
+    if atype == 'pull_s':
+        return env.execute_ns_pull(pos, z)
+    if atype == 'push_e':
+        return env.execute_ew_push(pos, z, direction=+1)
+    # push_w
+    return env.execute_ew_push(pos, z, direction=-1)
 
 
 def _sample_action(rng: np.random.Generator, state: dict, env: BinEnv,
                    bias_toward_exit: bool = True) -> dict:
-    """Sample a random action (push or pull).
+    """Sample a random action from the discrete action space.
 
     Returns a dict with keys:
-      action_type : 'push' | 'pull'
-      obj_idx  : int    - 0 = target, 1..N = obstacles
-      push_pos : (2,)   - xy position to act at (object center)
-      push_dir : (2,)   - unit push direction  (push only)
-      push_z   : float  - z height of pusher center
+      action_type : 'push_n' | 'pull_s' | 'push_e' | 'push_w'
+      obj_idx     : int   – 0 = target, 1..N = obstacles
+      push_pos    : (2,)  – xy position of chosen object
+      push_z      : float – discrete z level from env.z_levels
     """
     # Build (N+1, 3) position array: [target, obs0, obs1, ...]
     all_pos_3d = np.vstack([
         state['target_pos'][:3],
         *(state['obstacle_pos'][i][:3] for i in range(len(env.obstacles))),
-    ])  # shape (N+1, 3)
+    ])
 
     # Bias toward acting on the target
     obj_probs = np.ones(len(all_pos_3d))
     obj_probs[0] *= 3.0
     obj_probs /= obj_probs.sum()
-    obj_idx = rng.choice(len(all_pos_3d), p=obj_probs)
+    obj_idx = int(rng.choice(len(all_pos_3d), p=obj_probs))
 
     push_pos = all_pos_3d[obj_idx, :2]
-    push_z = float(all_pos_3d[obj_idx, 2])
 
-    # Choose pull or push
-    if bias_toward_exit and rng.random() < _PULL_PROB:
-        return {'action_type': 'pull', 'obj_idx': obj_idx,
-                'push_pos': push_pos, 'push_z': push_z}
+    # Discrete z level
+    z_idx  = int(rng.integers(len(env.z_levels)))
+    push_z = env.z_levels[z_idx]
 
-    # Sample non-southward push direction
-    dir_idx = rng.choice(len(DISCRETE_DIRS))
-    push_dir = DISCRETE_DIRS[dir_idx].copy()
-    push_dir += rng.normal(0, 0.15, 2)
-    push_dir /= np.linalg.norm(push_dir) + 1e-9
+    # Sample action type
+    weights = _WEIGHTS_BIASED if bias_toward_exit else _WEIGHTS_FLAT
+    atype   = _ACTION_TYPES[int(rng.choice(len(_ACTION_TYPES), p=weights))]
 
-    return {'action_type': 'push', 'obj_idx': obj_idx,
-            'push_pos': push_pos, 'push_dir': push_dir, 'push_z': push_z}
+    return {'action_type': atype, 'obj_idx': obj_idx,
+            'push_pos': push_pos, 'push_z': push_z}
 
 
 # ===========================================================================
@@ -496,3 +501,213 @@ class MCTSPusher:
             node = node.parent
         path.reverse()
         return path
+
+
+# ===========================================================================
+# Parallel RRT — batch-expands n_envs tree nodes simultaneously.
+# ===========================================================================
+
+class ParallelRRTPusher(RRTPusher):
+    """
+    RRT that expands n_envs nodes per iteration using ParallelBinEnv.
+
+    Each batch iteration selects n_envs nodes, samples one action each,
+    evaluates them all in one scene.step() sweep, then adds the results
+    to the tree. max_iter counts batch iterations, so total evaluations
+    = max_iter × n_envs.
+
+    Parameters
+    ----------
+    env          : BinEnv          – used for action sampling & z_levels
+    parallel_env : ParallelBinEnv  – executes physics in parallel
+    All other kwargs forwarded to RRTPusher.
+    """
+
+    def __init__(self, env, parallel_env, **kwargs):
+        super().__init__(env=env, **kwargs)
+        self.penv = parallel_env
+
+    def plan(self, initial_state=None, verbose: bool = True,
+             visualize_search: bool = False,
+             pause_each_iter: bool = False) -> list[dict] | None:
+
+        if visualize_search or pause_each_iter:
+            print('  [ParallelRRT] visualize_search/pause_each_iter ignored in parallel mode.')
+
+        if initial_state is None:
+            initial_state = self.env.get_state()
+
+        root = RRTNode(state=copy.deepcopy(initial_state))
+        tree: list[RRTNode] = [root]
+        best_node = root
+        best_reward = self.penv._compute_reward(initial_state)
+        k = self.penv.n_envs
+
+        t0 = time.time()
+        for i in range(self.max_iter):
+            # --- select k nodes to expand (same policy as single-env RRT) ---
+            weights = np.array([n.reward + 0.01 for n in tree])
+            weights /= weights.sum()
+
+            expand_nodes = []
+            for _ in range(k):
+                if self.rng.random() < 0.3:
+                    expand_nodes.append(best_node)
+                else:
+                    expand_nodes.append(
+                        tree[self.rng.choice(len(tree), p=weights)])
+
+            # Filter nodes that have hit max_depth (sample replacements)
+            expand_nodes = [
+                n if n.depth < self.max_depth else best_node
+                for n in expand_nodes
+            ]
+
+            # --- sample one action per node ---
+            actions = [
+                _sample_action(self.rng, n.state, self.env, bias_toward_exit=True)
+                for n in expand_nodes
+            ]
+
+            # --- batch evaluate all k expansions simultaneously ---
+            pairs = list(zip([n.state for n in expand_nodes], actions))
+            results = self.penv.batch_evaluate(pairs)
+
+            # --- incorporate results ---
+            for expand_node, action, (new_state, reward, done) in \
+                    zip(expand_nodes, actions, results):
+
+                if self.penv._obstacles_dropped(new_state):
+                    continue
+
+                new_node = RRTNode(
+                    state=copy.deepcopy(new_state),
+                    action=action,
+                    parent=expand_node,
+                    reward=reward,
+                    depth=expand_node.depth + 1,
+                )
+                tree.append(new_node)
+
+                if reward > best_reward:
+                    best_reward = reward
+                    best_node = new_node
+
+                if done:
+                    if verbose:
+                        print(f'  Goal reached at batch {i+1}! '
+                              f'(~{(i+1)*k} total evals)')
+                    self.tree = tree
+                    self.best_node = new_node
+                    return self._extract_path(new_node)
+
+            if verbose and (i + 1) % 10 == 0:
+                elapsed = time.time() - t0
+                print(f'  RRT batch {i+1:3d}/{self.max_iter} | '
+                      f'tree={len(tree)} | best_reward={best_reward:.3f} | '
+                      f'{elapsed:.1f}s')
+
+        if verbose:
+            print(f'  RRT finished. Best reward={best_reward:.3f}')
+        self.tree = tree
+        self.best_node = best_node
+        return self._extract_path(best_node) if best_node.depth > 0 else None
+
+
+# ===========================================================================
+# Parallel MCTS — uses ParallelBinEnv.batch_evaluate() for GPU-parallel
+# expansion and rollouts.
+# ===========================================================================
+
+class ParallelMCTSPusher(MCTSPusher):
+    """
+    Drop-in replacement for MCTSPusher that evaluates all children and
+    rollouts in parallel using a ParallelBinEnv.
+
+    Expansion:  n_children actions → one batch_evaluate call (all on GPU).
+    Rollout:    n_rollouts independent random rollouts from the same node,
+                evaluated depth-by-depth in parallel; returns best reward.
+
+    Parameters
+    ----------
+    env          : BinEnv          – used for action sampling & z_levels
+    parallel_env : ParallelBinEnv  – executes physics in parallel
+    n_rollouts   : int             – parallel rollouts per node (≤ parallel_env.n_envs)
+    All other kwargs forwarded to MCTSPusher.
+    """
+
+    def __init__(self, env, parallel_env, n_rollouts: int = 4, **kwargs):
+        super().__init__(env=env, **kwargs)
+        self.penv      = parallel_env
+        self.n_rollouts = min(n_rollouts, parallel_env.n_envs)
+
+    # ------------------------------------------------------------------
+    # Override: parallel expansion
+    # ------------------------------------------------------------------
+
+    def _expand(self, node: MCTSNode) -> MCTSNode:
+        """Sample n_children actions, evaluate ALL in one batch call."""
+        actions = [_sample_action(self.rng, node.state, self.env)
+                   for _ in range(self.n_children)]
+        pairs   = [(node.state, a) for a in actions]
+        results = self.penv.batch_evaluate(pairs)   # ← single GPU batch
+
+        for action, (new_state, reward, done) in zip(actions, results):
+            child = MCTSNode(
+                state    = copy.deepcopy(new_state),
+                action   = action,
+                parent   = node,
+                depth    = node.depth + 1,
+                done     = done,
+                dead_end = self.penv._obstacles_dropped(new_state),
+            )
+            child.total_reward = reward
+            child.visits       = 1
+            node.children.append(child)
+
+        if node.children:
+            return max(node.children, key=lambda c: c.mean_reward)
+        return node
+
+    # ------------------------------------------------------------------
+    # Override: parallel rollouts
+    # ------------------------------------------------------------------
+
+    def _rollout(self, node: MCTSNode) -> float:
+        """
+        Run n_rollouts independent random rollouts from node.state in
+        parallel, depth-by-depth. Returns the best reward seen.
+
+        Each rollout depth level is one batch_evaluate call, so the total
+        GPU work is rollout_depth × batch calls (vs rollout_depth × n_rollouts
+        sequential calls without parallelism).
+        """
+        if node.done:
+            return 1.0
+        if node.dead_end:
+            return self.penv._compute_reward(node.state)
+
+        # All rollouts start from the same node state
+        states  = [copy.deepcopy(node.state) for _ in range(self.n_rollouts)]
+        active  = list(range(self.n_rollouts))   # indices still running
+        best_r  = self.penv._compute_reward(node.state)
+
+        for _ in range(self.rollout_depth):
+            if not active:
+                break
+            pairs   = [(states[i], _sample_action(self.rng, states[i], self.env))
+                       for i in active]
+            results = self.penv.batch_evaluate(pairs)
+
+            still_active = []
+            for slot, i in enumerate(active):
+                new_state, reward, done = results[slot]
+                states[i] = new_state
+                best_r = max(best_r, reward)
+                if done:
+                    return 1.0
+                if not self.penv._obstacles_dropped(new_state):
+                    still_active.append(i)
+            active = still_active
+
+        return best_r

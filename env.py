@@ -1,6 +1,6 @@
 """
 BinEnv: Genesis simulation of a bin with objects.
-A pusher (kinematically controlled box) can push rigid objects.
+Two thin pushers (N/S-oriented and E/W-oriented) act kinematically.
 Goal: move the target object out of the bin through the open south side.
 
 Bin layout (top-down, z-up):
@@ -26,39 +26,57 @@ BIN_D = 0.3   # y extent (depth, from 0 to BIN_D)
 BIN_H = 0.15  # wall height
 WALL_T = 0.02 # wall thickness
 
-OBJ_SIZE = 0.08   # object cube half-size * 2
-PUSHER_SIZE = 0.07  # pusher cube size
-OBJ_H = OBJ_SIZE / 2  # resting z
+OBJ_SIZE = 0.08        # object cube side length
+OBJ_H    = OBJ_SIZE / 2  # object center z when resting on floor
+
+PUSHER_T = 0.012              # thin dimension of each pusher blade
+PUSHER_W = OBJ_SIZE * 0.88   # wide dimension (slightly smaller than objects)
 
 EXIT_Y = -0.05  # target exits when its y < EXIT_Y
+
+_PARK = [BIN_W / 2, -2.0, OBJ_H]  # safe parking position outside the bin
 
 
 class BinEnv:
     """
     Wraps a Genesis scene with a bin, N obstacle objects, and 1 target object.
-    The pusher is a kinematically moved box.
+
+    Two thin pusher blades are kinematically controlled:
+      pusher_ns  – thin in y, wide in x; used for north/south strokes
+      pusher_ew  – thin in x, wide in y; used for east/west strokes
+
+    Z heights for pushing are discretized into `n_z_levels` evenly spaced
+    levels from floor height up through the stacking range.
 
     Parameters
     ----------
     n_obstacles : int
-        Number of obstacle objects in the bin.
     show_viewer : bool
-        Whether to open the interactive viewer.
     dt : float
-        Simulation timestep.
     seed : int | None
-        Random seed for object placement.
+    stackable : bool
+    friction : float
+    n_z_levels : int
+        Number of discrete push heights (1 = floor only).
     """
 
     def __init__(self, n_obstacles: int = 2, show_viewer: bool = False,
-                 dt: float = 0.01, seed: int | None = None, stackable: bool = False,
-                 friction: float = 1.0):
+                 dt: float = 0.01, seed: int | None = None,
+                 stackable: bool = False, friction: float = 1.0,
+                 n_z_levels: int = 1,
+                 push_steps: int = 20, substeps: int = 4):
         self.n_obstacles = n_obstacles
         self.show_viewer = show_viewer
         self.friction = friction
         self.dt = dt
         self.stackable = stackable
+        self.n_z_levels = n_z_levels
+        self.push_steps = push_steps
+        self.substeps = substeps
         self.rng = np.random.default_rng(seed)
+
+        # Discrete z levels: floor height, one-box up, two-boxes up, …
+        self.z_levels = [OBJ_H + i * OBJ_SIZE for i in range(n_z_levels)]
 
         self._build_scene()
 
@@ -69,25 +87,34 @@ class BinEnv:
     def _build_scene(self):
         self.scene = gs.Scene(
             viewer_options=gs.options.ViewerOptions(
-                camera_fov = 30,
-                camera_pos = (0.48511935, -0.76658447, 0.6780057), 
-                camera_lookat = (0.30222618, 0.05807024, 0.14275379),
+                camera_fov=30,
+                camera_pos=(0.48511935, -0.76658447, 0.6780057),
+                camera_lookat=(0.30222618, 0.05807024, 0.14275379),
             ),
             show_viewer=self.show_viewer,
-            sim_options=gs.options.SimOptions(dt=self.dt, substeps=4),
+            sim_options=gs.options.SimOptions(dt=self.dt, substeps=self.substeps),
             rigid_options=gs.options.RigidOptions(
                 gravity=(0, 0, -9.81),
+                box_box_detection=False,      # accurate box-box contacts (all objects are boxes)
+                enable_self_collision=False,  # boxes can't self-collide
+                iterations=15,               # constraint solver iters (default 50)
+                ls_iterations=10,            # line-search iters (default 50)
+                use_hibernation=True,        # sleep resting objects
             ),
         )
 
+        self.plane = self.scene.add_entity(
+            morph=gs.morphs.Plane(),
+        )
+
         # --- floor ---
-        self.floor = self.scene.add_entity(
+        self.scene.add_entity(
             gs.morphs.Box(
                 size=(BIN_W + 2 * WALL_T, BIN_D + 2 * WALL_T, WALL_T),
                 pos=(BIN_W / 2, BIN_D / 2, -WALL_T / 2),
                 fixed=True,
             ),
-            surface=gs.surfaces.Default(color=(0.7, 0.6, 0.5, 1.0)),
+            surface=gs.surfaces.Default(color=(0.7, 0.6, 0.5)),
         )
 
         # --- north wall ---
@@ -120,14 +147,24 @@ class BinEnv:
             surface=gs.surfaces.Default(color=(0.5, 0.5, 0.8), opacity=0.35),
         )
 
-        # --- pusher (kinematic) ---
-        self.pusher = self.scene.add_entity(
+        # --- N/S pusher blade: wide in x, thin in y ---
+        self.pusher_ns = self.scene.add_entity(
             gs.morphs.Box(
-                size=(0.5*PUSHER_SIZE, 0.5*PUSHER_SIZE, 0.5*PUSHER_SIZE),
-                pos=(BIN_W / 2, BIN_D / 2, OBJ_H),
+                size=(PUSHER_W, PUSHER_T, PUSHER_W),
+                pos=_PARK,
             ),
             material=gs.materials.Rigid(rho=10000, friction=self.friction),
-            surface=gs.surfaces.Default(color=(0.2, 0.8, 0.2), opacity=0.35),
+            surface=gs.surfaces.Default(color=(0.2, 0.9, 0.2), opacity=0.8),
+        )
+
+        # --- E/W pusher blade: thin in x, wide in y ---
+        self.pusher_ew = self.scene.add_entity(
+            gs.morphs.Box(
+                size=(PUSHER_T, PUSHER_W, PUSHER_W),
+                pos=_PARK,
+            ),
+            material=gs.materials.Rigid(rho=10000, friction=self.friction),
+            surface=gs.surfaces.Default(color=(0.9, 0.6, 0.1), opacity=0.8),
         )
 
         # --- target object ---
@@ -136,8 +173,8 @@ class BinEnv:
                 size=(OBJ_SIZE, OBJ_SIZE, OBJ_SIZE),
                 pos=(BIN_W / 2, BIN_D / 2, OBJ_H),
             ),
-            material=gs.materials.Rigid(rho=500, friction=self.friction),
-            surface=gs.surfaces.Default(color=(0.9, 0.2, 0.2), opacity=0.35),
+            material=gs.materials.Rigid(rho=50, friction=self.friction),
+            surface=gs.surfaces.Default(color=(0.9, 0.2, 0.2), opacity=0.6),
         )
 
         # --- obstacle objects ---
@@ -149,7 +186,7 @@ class BinEnv:
                     pos=(BIN_W / 2, BIN_D / 2, OBJ_H),
                 ),
                 material=gs.materials.Rigid(rho=500, friction=self.friction),
-                surface=gs.surfaces.Default(color=(0.3, 0.5, 0.9), opacity=0.35),
+                surface=gs.surfaces.Default(color=(0.3, 0.5, 0.9), opacity=0.6),
             )
             self.obstacles.append(obs)
 
@@ -166,19 +203,15 @@ class BinEnv:
         x_lo, x_hi = margin, BIN_W - margin
         y_lo, y_hi = margin, BIN_D - margin
 
-        # positions list stores (x, y, stack_height) where stack_height is
-        # how many objects are already at that (x, y) column.
-        columns: list[tuple[float, float, int]] = []  # (x, y, count)
-        all_objs = [self.target] + self.obstacles
+        columns: list[tuple[float, float, int]] = []
+        all_objs = self.obstacles + [self.target]
 
         for obj in all_objs:
             placed = False
-            # If stackable, first try placing on top of an existing column.
             if self.stackable and columns and self.rng.random() < 0.5:
                 idx = self.rng.integers(len(columns))
                 x, y, count = columns[idx]
-                z = OBJ_H + OBJ_SIZE * count
-                obj.set_pos([x, y, z])
+                obj.set_pos([x, y, OBJ_H + OBJ_SIZE * count])
                 columns[idx] = (x, y, count + 1)
                 placed = True
 
@@ -192,15 +225,12 @@ class BinEnv:
                         columns.append((x, y, 1))
                         break
 
-        # Park pusher at the bin exit edge (y=0, still on the floor)
-        self.pusher.set_pos([BIN_W / 2, 0.0, OBJ_H])
+        self._park_pushers()
         self._zero_all_velocities()
 
-        # Settle objects
         for _ in range(60):
             self.scene.step()
 
-        self._initial_state = self._get_state()
         self._ckpt_path = os.path.join(tempfile.mkdtemp(), 'initial')
         self.scene.save_checkpoint(self._ckpt_path)
 
@@ -208,29 +238,32 @@ class BinEnv:
     # State management
     # ------------------------------------------------------------------
 
+    def _park_pushers(self):
+        identity = [1.0, 0.0, 0.0, 0.0]
+        self.pusher_ns.set_pos(_PARK)
+        self.pusher_ns.set_quat(identity)
+        self.pusher_ew.set_pos(_PARK)
+        self.pusher_ew.set_quat(identity)
+
     def _zero_all_velocities(self):
-        for obj in [self.pusher, self.target] + self.obstacles:
+        for obj in [self.pusher_ns, self.pusher_ew, self.target] + self.obstacles:
             obj.zero_all_dofs_velocity()
 
     def _get_state(self) -> dict:
-        """Return a lightweight state dict (numpy arrays, copyable)."""
-        state = {
-            'target_pos': self.target.get_pos().cpu().numpy().copy(),
-            'target_quat': self.target.get_quat().cpu().numpy().copy(),
-            'obstacle_pos': np.array([o.get_pos().cpu().numpy() for o in self.obstacles]),
+        return {
+            'target_pos':    self.target.get_pos().cpu().numpy().copy(),
+            'target_quat':   self.target.get_quat().cpu().numpy().copy(),
+            'obstacle_pos':  np.array([o.get_pos().cpu().numpy() for o in self.obstacles]),
             'obstacle_quat': np.array([o.get_quat().cpu().numpy() for o in self.obstacles]),
-            'pusher_pos': self.pusher.get_pos().cpu().numpy().copy(),
         }
-        return state
 
     def _set_state(self, state: dict):
-        """Restore simulation state from a dict (without disk I/O)."""
         self.target.set_pos(state['target_pos'].tolist())
         self.target.set_quat(state['target_quat'].tolist())
         for i, obs in enumerate(self.obstacles):
             obs.set_pos(state['obstacle_pos'][i].tolist())
             obs.set_quat(state['obstacle_quat'][i].tolist())
-        self.pusher.set_pos(state['pusher_pos'].tolist())
+        self._park_pushers()
         self._zero_all_velocities()
 
     def get_state(self) -> dict:
@@ -251,143 +284,88 @@ class BinEnv:
         return self._get_state()
 
     # ------------------------------------------------------------------
-    # Pushing actions
+    # Action primitives
     # ------------------------------------------------------------------
 
-    def execute_push(self, push_pos_2d: np.ndarray, push_dir_2d: np.ndarray,
-                     push_z: float | None = None,
-                     push_dist: float = 0.25, approach_dist: float = 0.12,
-                     push_steps: int = 80, step_delay: float = 0.0) -> tuple[dict, float, bool]:
-        """
-        Move pusher behind `push_pos_2d` and push in `push_dir_2d`.
+    def _stroke_and_eval(self, pusher, start_3d: list, end_3d: list,
+                         steps: int, step_delay: float) -> tuple[dict, float, bool]:
+        """Teleport pusher to start, sweep to end, park, settle, return result."""
+        start = np.array(start_3d, dtype=float)
+        end   = np.array(end_3d,   dtype=float)
+        identity = [1.0, 0.0, 0.0, 0.0]  # w, x, y, z
 
-        Parameters
-        ----------
-        push_pos_2d : (2,) array - (x, y) point to push at
-        push_dir_2d : (2,) array - unit push direction in xy
-        push_z      : z height of pusher center during push; defaults to OBJ_H (floor level)
-        push_dist   : total distance to travel forward
-        approach_dist : how far behind the push point to start
-        push_steps  : simulation steps during push stroke
-
-        Returns
-        -------
-        state : dict
-        reward : float
-        done : bool
-        """
-        d = push_dir_2d / (np.linalg.norm(push_dir_2d) + 1e-9)
-        z = OBJ_H if push_z is None else float(push_z)
-
-        # Start position: behind the push point
-        start_xy = push_pos_2d - d * approach_dist
-        end_xy = push_pos_2d + d * push_dist
-
-        # Move pusher to start (teleport, no collision)
-        start_3d = [start_xy[0], start_xy[1], z]
-        self.pusher.set_pos(start_3d)
+        pusher.set_pos(start.tolist())
+        pusher.set_quat(identity)
         self._zero_all_velocities()
-        # settle briefly
-        for _ in range(5):
-            self.pusher.set_pos(start_3d)
+        for _ in range(2):
+            pusher.set_pos(start.tolist())
+            pusher.set_quat(identity)
             self.scene.step()
 
-        # Execute push stroke
-        for i in range(push_steps):
-            t = (i + 1) / push_steps
-            cur_xy = start_xy + t * (end_xy - start_xy)
-            self.pusher.set_pos([cur_xy[0], cur_xy[1], z])
+        for i in range(steps):
+            t = (i + 1) / steps
+            pusher.set_pos((start + t * (end - start)).tolist())
+            pusher.set_quat(identity)
             self.scene.step()
             if step_delay > 0:
                 time.sleep(step_delay)
 
-        # Retract pusher to exit edge
-        self.pusher.set_pos([BIN_W / 2, 10.0, OBJ_H])
+        self._park_pushers()
         self._zero_all_velocities()
-        for _ in range(20):
+        for _ in range(2):
             self.scene.step()
 
-        state = self._get_state()
+        state  = self._get_state()
         reward = self._compute_reward(state)
-        done = self._is_goal(state)
+        done   = self._is_goal(state)
         return state, reward, done
 
-    def execute_pull(self, pull_pos_2d: np.ndarray,
-                     pull_z: float | None = None,
-                     approach_dist: float = 0.12,
-                     pull_steps: int = 80, step_delay: float = 0.0) -> tuple[dict, float, bool]:
-        """
-        Pull an object toward the exit by entering from the south, teleporting
-        to the north side of the object, then sweeping southward to the exit.
+    def execute_ns_push(self, pos_2d: np.ndarray, z: float,
+                        push_dist: float = 0.25, approach_dist: float = 0.12,
+                        push_steps: int | None = None, step_delay: float = 0.0) -> tuple[dict, float, bool]:
+        """Push northward: pusher_ns enters from south, sweeps north."""
+        start = [pos_2d[0], pos_2d[1] - approach_dist, z]
+        end   = [pos_2d[0], pos_2d[1] + push_dist,     z]
+        return self._stroke_and_eval(self.pusher_ns, start, end,
+                                     push_steps or self.push_steps, step_delay)
 
-        Parameters
-        ----------
-        pull_pos_2d : (2,) array - (x, y) position of the object to pull
-        pull_z      : z height of pusher; defaults to OBJ_H
-        approach_dist : how far north of the object to start the pull stroke
-        pull_steps  : simulation steps during pull stroke
-        """
-        z = OBJ_H if pull_z is None else float(pull_z)
+    def execute_ns_pull(self, pos_2d: np.ndarray, z: float,
+                        approach_dist: float = 0.12,
+                        pull_steps: int | None = None, step_delay: float = 0.0) -> tuple[dict, float, bool]:
+        """Pull southward: pusher_ns hooks north of object, sweeps south to exit."""
+        start = [pos_2d[0], pos_2d[1] + approach_dist, z]
+        end   = [pos_2d[0], EXIT_Y - approach_dist,     z]
+        return self._stroke_and_eval(self.pusher_ns, start, end,
+                                     pull_steps or self.push_steps, step_delay)
 
-        # Start north of the object (arm enters from south, hooks behind)
-        start_xy = np.array([pull_pos_2d[0], pull_pos_2d[1] + approach_dist])
-        # Pull all the way to the exit edge
-        end_xy = np.array([pull_pos_2d[0], EXIT_Y - approach_dist])
-
-        start_3d = [start_xy[0], start_xy[1], z]
-        self.pusher.set_pos(start_3d)
-        self._zero_all_velocities()
-        for _ in range(5):
-            self.pusher.set_pos(start_3d)
-            self.scene.step()
-
-        # Sweep southward
-        for i in range(pull_steps):
-            t = (i + 1) / pull_steps
-            cur_xy = start_xy + t * (end_xy - start_xy)
-            self.pusher.set_pos([cur_xy[0], cur_xy[1], z])
-            self.scene.step()
-            if step_delay > 0:
-                time.sleep(step_delay)
-
-        # Retract pusher to exit edge
-        self.pusher.set_pos([BIN_W / 2, 0.0, OBJ_H])
-        self._zero_all_velocities()
-        for _ in range(20):
-            self.scene.step()
-
-        state = self._get_state()
-        reward = self._compute_reward(state)
-        done = self._is_goal(state)
-        return state, reward, done
+    def execute_ew_push(self, pos_2d: np.ndarray, z: float, direction: int,
+                        push_dist: float = 0.25, approach_dist: float = 0.12,
+                        push_steps: int | None = None, step_delay: float = 0.0) -> tuple[dict, float, bool]:
+        """Push east (direction=+1) or west (direction=-1): pusher_ew sweeps laterally."""
+        start = [pos_2d[0] - direction * approach_dist, pos_2d[1], z]
+        end   = [pos_2d[0] + direction * push_dist,     pos_2d[1], z]
+        return self._stroke_and_eval(self.pusher_ew, start, end,
+                                     push_steps or self.push_steps, step_delay)
 
     # ------------------------------------------------------------------
     # Reward / goal
     # ------------------------------------------------------------------
 
     def _obstacles_dropped(self, state: dict) -> bool:
-        """Return True if any obstacle has left the bin."""
-        return any(
-            state['obstacle_pos'][i][1] < EXIT_Y
-            for i in range(len(self.obstacles))
-        )
+        return any(state['obstacle_pos'][i][1] < EXIT_Y
+                   for i in range(len(self.obstacles)))
 
     def _compute_reward(self, state: dict) -> float:
-        """Reward = progress of target toward exit, minus penalty for dropped obstacles."""
         y = state['target_pos'][1]
-        # Normalize: 0 when y=BIN_D/2 (center), 1 when y=EXIT_Y
         r = (BIN_D / 2 - y) / (BIN_D / 2 - EXIT_Y)
         r = float(np.clip(r, 0, 1))
-        # Penalty for each obstacle that has left the bin
-        self.n_dropped = sum(
-            1 for i in range(len(self.obstacles))
-            if state['obstacle_pos'][i][1] < EXIT_Y
-        )
-        r -= 0.5 * self.n_dropped
+        n_dropped = sum(1 for i in range(len(self.obstacles))
+                        if state['obstacle_pos'][i][1] < EXIT_Y)
+        r -= 0.5 * n_dropped
         return r
 
     def _is_goal(self, state: dict) -> bool:
-        if self.n_dropped > 0:
+        if self._obstacles_dropped(state):
             return False
         return float(state['target_pos'][1]) < EXIT_Y
 
@@ -395,7 +373,7 @@ class BinEnv:
         return self._is_goal(state)
 
     # ------------------------------------------------------------------
-    # Convenience: query object positions
+    # Convenience
     # ------------------------------------------------------------------
 
     def get_target_pos_2d(self, state: dict | None = None) -> np.ndarray:
