@@ -1,8 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(conda run -n genesistest2 python -c \"import genesis as gs; help\\(gs.Scene\\)\")",
-      "Bash(conda run -n genesistest2 python -c \":*)"
-    ]
-  }
-}
