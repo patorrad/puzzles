@@ -32,3 +32,6 @@ runs/
 .idea/
 *.swp
 *~
+
+# claude
+.claude
