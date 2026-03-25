@@ -28,6 +28,7 @@ import copy
 import math
 import time
 import numpy as np
+from tqdm import tqdm
 from typing import Optional
 
 from env import BinEnv, BIN_W, BIN_D, EXIT_Y, OBJ_SIZE
@@ -39,6 +40,8 @@ _ACTION_TYPES  = ['push_n', 'pull_s', 'push_e', 'push_w']
 _WEIGHTS_BIASED = np.array([0.45, 0.45, 0.05, 0.05])
 _WEIGHTS_FLAT   = np.array([0.25, 0.25, 0.25, 0.25])
 
+def _hash_action(action: dict) -> tuple:
+    return action['action_type'], action['obj_idx'], tuple(action['push_pos'].tolist()), action['push_z']
 
 def _execute_action(env: BinEnv, action: dict) -> tuple[dict, float, bool]:
     """Dispatch a sampled action to the appropriate env method."""
@@ -56,7 +59,7 @@ def _execute_action(env: BinEnv, action: dict) -> tuple[dict, float, bool]:
 
 
 def _sample_action(rng: np.random.Generator, state: dict, env: BinEnv,
-                   bias_toward_exit: bool = True) -> dict:
+                   bias_toward_exit: bool = True, recurse_depth = 0, max_recurse_depth = 10, sampled_actions = {}) -> dict:
     """Sample a random action from the discrete action space.
 
     Returns a dict with keys:
@@ -65,6 +68,8 @@ def _sample_action(rng: np.random.Generator, state: dict, env: BinEnv,
       push_pos    : (2,)  – xy position of chosen object
       push_z      : float – discrete z level from env.z_levels
     """
+
+    
     # Build (N+1, 3) position array: [target, obs0, obs1, ...]
     all_pos_3d = np.vstack([
         state['target_pos'][:3],
@@ -73,7 +78,7 @@ def _sample_action(rng: np.random.Generator, state: dict, env: BinEnv,
 
     # Bias toward acting on the target
     obj_probs = np.ones(len(all_pos_3d))
-    obj_probs[0] *= 3.0
+    obj_probs[0] *= len(all_pos_3d)
     obj_probs /= obj_probs.sum()
     obj_idx = int(rng.choice(len(all_pos_3d), p=obj_probs))
 
@@ -86,9 +91,14 @@ def _sample_action(rng: np.random.Generator, state: dict, env: BinEnv,
     # Sample action type
     weights = _WEIGHTS_BIASED if bias_toward_exit else _WEIGHTS_FLAT
     atype   = _ACTION_TYPES[int(rng.choice(len(_ACTION_TYPES), p=weights))]
-
-    return {'action_type': atype, 'obj_idx': obj_idx,
+    
+    action = {'action_type': atype, 'obj_idx': obj_idx,
             'push_pos': push_pos, 'push_z': push_z}
+
+    if recurse_depth < max_recurse_depth and _hash_action(action) in sampled_actions:
+        return _sample_action(rng, state, env, bias_toward_exit, recurse_depth + 1, max_recurse_depth, sampled_actions)
+    else:
+        return action
 
 
 # ===========================================================================
@@ -313,8 +323,9 @@ class RRTPusher:
 # ===========================================================================
 
 class MCTSNode:
-    __slots__ = ('state', 'action', 'parent', 'children',
-                 'visits', 'total_reward', 'depth', 'done', 'dead_end')
+    # __slots__ = ('state', 'action', 'parent', 'children',
+    #              'visits', 'total_reward', 'depth', 'done', 'dead_end', 'sampled_actions'
+    #              'virtual_visits')
 
     def __init__(self, state: dict, action: dict | None = None,
                  parent: 'MCTSNode | None' = None, depth: int = 0,
@@ -328,16 +339,26 @@ class MCTSNode:
         self.depth = depth
         self.done = done
         self.dead_end = dead_end  # obstacle dropped — never expand
+        self.sampled_actions = {}
+        self.virtual_visits = 0
 
     @property
     def mean_reward(self) -> float:
-        return self.total_reward / max(1, self.visits)
+        return self.total_reward / (max(1, self.visits) + self.virtual_visits)
+
+    def increment_virtual_visits(self):
+        self.virtual_visits += 1
+        if self.parent:
+            self.parent.increment_virtual_visits()
+
+    def reset_virtual_visits(self):
+        self.virtual_visits = 0
 
     def ucb(self, c: float = 1.4) -> float:
         if self.visits == 0:
             return float('inf')
         parent_visits = self.parent.visits if self.parent else 1
-        return self.mean_reward + c * math.sqrt(math.log(parent_visits) / self.visits)
+        return self.mean_reward + c * math.sqrt(2*math.log(parent_visits + self.parent.virtual_visits) / (self.visits + self.virtual_visits))
 
     def best_child(self, c: float = 1.4) -> 'MCTSNode':
         return max(self.children, key=lambda n: n.ucb(c))
@@ -388,13 +409,12 @@ class MCTSPusher:
         best_reward = self.env._compute_reward(initial_state)
 
         t0 = time.time()
-        for sim_i in range(self.n_simulations):
+        for sim_i in tqdm(range(self.n_simulations)):
             # 1. Selection
             node = self._select(root)
 
             # 2. Expansion
-            if not node.done and not node.dead_end and node.depth < self.max_depth:
-                node = self._expand(node)
+            node = self._expand(node)
 
             # 3. Rollout
             rollout_reward = self._rollout(node)
@@ -403,21 +423,26 @@ class MCTSPusher:
             self._backprop(node, rollout_reward)
 
             # Track best goal
-            if rollout_reward > best_reward:
-                best_reward = rollout_reward
-                best_leaf = node
+            if type(rollout_reward) != list:
+                rollout_reward = [rollout_reward]
+                node = [node]
+            
+            for rr, n in zip(rollout_reward, node):
+                if rr > best_reward:
+                    best_reward = rr
+                    best_leaf = n
 
-            if node.done:
-                if verbose:
-                    print(f'  MCTS: Goal reached at simulation {sim_i+1}!')
-                self.root = root
-                self.best_leaf = node
-                return self._extract_path(node)
+                if n.done:
+                    if verbose:
+                        print(f'  MCTS: Goal reached at simulation {sim_i+1}!')
+                    self.root = root
+                    self.best_leaf = n
+                    return self._extract_path(n)
 
-            if verbose and (sim_i + 1) % 20 == 0:
+            if verbose and (sim_i + 1) % 1 == 0:
                 elapsed = time.time() - t0
                 print(f'  MCTS sim {sim_i+1:3d}/{self.n_simulations} | '
-                      f'best_reward={best_reward:.3f} | {elapsed:.1f}s')
+                    f'best_reward={best_reward:.3f} | {elapsed:.1f}s')
 
         if verbose:
             print(f'  MCTS finished. Best reward={best_reward:.3f}')
@@ -439,8 +464,12 @@ class MCTSPusher:
 
     def _expand(self, node: MCTSNode) -> MCTSNode:
         """Generate children by simulating n_children random pushes."""
+        if node.done or node.dead_end or node.depth < self.max_depth:
+            return node
+
         for _ in range(self.n_children):
-            action = _sample_action(self.rng, node.state, self.env)
+            action = _sample_action(self.rng, node.state, self.env, sampled_actions=node.sampled_actions)
+            node.sampled_actions[_hash_action(action)] = True
             self.env.set_state(node.state)
             new_state, reward, done = _execute_action(self.env, action)
             child = MCTSNode(
@@ -639,20 +668,37 @@ class ParallelMCTSPusher(MCTSPusher):
     def __init__(self, env, parallel_env, n_rollouts: int = 4, **kwargs):
         super().__init__(env=env, **kwargs)
         self.penv      = parallel_env
+        self.envs = self.penv.n_envs
         self.n_rollouts = min(n_rollouts, parallel_env.n_envs)
+
+    def _select(self, root: MCTSNode) -> MCTSNode:
+
+        """Traverse tree using UCB until a leaf or unexpanded node."""
+        nodes = []
+        for _ in range(self.envs):
+            node = root
+            while not node.is_leaf() and not node.done:
+                node = node.best_child(self.c_ucb)
+            nodes.append(node)
+            node.increment_virtual_visits()
+        for node in nodes:
+            node.reset_virtual_visits()
+        return nodes
 
     # ------------------------------------------------------------------
     # Override: parallel expansion
     # ------------------------------------------------------------------
 
-    def _expand(self, node: MCTSNode) -> MCTSNode:
+
+    def _expand(self, nodes: list[MCTSNode]) -> list[MCTSNode]:
         """Sample n_children actions, evaluate ALL in one batch call."""
-        actions = [_sample_action(self.rng, node.state, self.env)
-                   for _ in range(self.n_children)]
-        pairs   = [(node.state, a) for a in actions]
+        
+        actions = [_sample_action(self.rng, n.state, self.env)
+                   for n in nodes]
+        pairs   = [(n.state, a) for (n,a) in zip(nodes, actions)]
         results = self.penv.batch_evaluate(pairs)   # ← single GPU batch
 
-        for action, (new_state, reward, done) in zip(actions, results):
+        for node, action, (new_state, reward, done) in zip(nodes, actions, results):
             child = MCTSNode(
                 state    = copy.deepcopy(new_state),
                 action   = action,
@@ -665,15 +711,22 @@ class ParallelMCTSPusher(MCTSPusher):
             child.visits       = 1
             node.children.append(child)
 
-        if node.children:
-            return max(node.children, key=lambda c: c.mean_reward)
-        return node
+            
+        expanded_nodes = []
+        for node in nodes:
+            if node.done or node.dead_end or node.depth < self.max_depth:
+                expanded_nodes.append(node)
+            elif node.children:
+                expanded_nodes.append(max(node.children, key=lambda c: c.mean_reward))
+            else:
+                expanded_nodes.append(child)
+        return expanded_nodes
 
     # ------------------------------------------------------------------
     # Override: parallel rollouts
     # ------------------------------------------------------------------
 
-    def _rollout(self, node: MCTSNode) -> float:
+    def _rollout(self, nodes: list[MCTSNode]) -> list[float]:
         """
         Run n_rollouts independent random rollouts from node.state in
         parallel, depth-by-depth. Returns the best reward seen.
@@ -682,20 +735,18 @@ class ParallelMCTSPusher(MCTSPusher):
         GPU work is rollout_depth × batch calls (vs rollout_depth × n_rollouts
         sequential calls without parallelism).
         """
-        if node.done:
-            return 1.0
-        if node.dead_end:
-            return self.penv._compute_reward(node.state)
+        rewards = []
+
 
         # All rollouts start from the same node state
-        states  = [copy.deepcopy(node.state) for _ in range(self.n_rollouts)]
-        active  = list(range(self.n_rollouts))   # indices still running
-        best_r  = self.penv._compute_reward(node.state)
+        states  = [copy.deepcopy(n.state) for n in nodes]
+        active  = list(range(len(states)))   # indices still running
+        best_rewards = [self.penv._compute_reward(s) for s in states]
 
         for _ in range(self.rollout_depth):
             if not active:
                 break
-            pairs   = [(states[i], _sample_action(self.rng, states[i], self.env))
+            pairs  = [(states[i], _sample_action(self.rng, states[i], self.env))
                        for i in active]
             results = self.penv.batch_evaluate(pairs)
 
@@ -703,11 +754,38 @@ class ParallelMCTSPusher(MCTSPusher):
             for slot, i in enumerate(active):
                 new_state, reward, done = results[slot]
                 states[i] = new_state
-                best_r = max(best_r, reward)
+                best_rewards[i] = max(best_rewards[i], reward)
                 if done:
-                    return 1.0
+                     best_rewards[i] = 1.0
                 if not self.penv._obstacles_dropped(new_state):
                     still_active.append(i)
             active = still_active
 
-        return best_r
+        for i in range(len(nodes)):
+            if nodes[i].done:
+                best_rewards[i] = 1.0
+            if nodes[i].dead_end:
+                best_rewards[i] = self.penv._compute_reward(nodes[0].state)
+
+        return best_rewards
+
+
+    def _backprop(self, nodes: list[MCTSNode], rewards: list[float]):
+        """Propagate reward up to root."""
+
+        non_duplicate_nodes = list()
+        non_duplicate_rewards = list()
+
+        for node, reward in zip(nodes, rewards):
+            if node in non_duplicate_nodes:
+                node_idx = non_duplicate_nodes.index(node)
+                non_duplicate_rewards[node_idx] = max(reward, non_duplicate_rewards[node_idx])
+            else:
+                non_duplicate_nodes.append(node)
+                non_duplicate_rewards.append(reward)
+
+        for node, reward in zip(non_duplicate_nodes, non_duplicate_rewards):
+            while node is not None:
+                node.visits += 1
+                node.total_reward += reward
+                node = node.parent

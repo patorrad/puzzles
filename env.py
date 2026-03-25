@@ -18,12 +18,12 @@ import time
 import numpy as np
 import genesis as gs
 
-gs.init(logging_level='warning')
+gs.init(logging_level='info', backend=gs.gpu, performance_mode=True)
 
 # Bin dimensions
-BIN_W = 0.3   # x extent
-BIN_D = 0.3   # y extent (depth, from 0 to BIN_D)
-BIN_H = 0.15  # wall height
+BIN_W = 1.0   # x extent
+BIN_D = 1.0   # y extent (depth, from 0 to BIN_D)
+BIN_H = 0.5  # wall height
 WALL_T = 0.02 # wall thickness
 
 OBJ_SIZE = 0.08        # object cube side length
@@ -97,9 +97,10 @@ class BinEnv:
                 gravity=(0, 0, -9.81),
                 box_box_detection=False,      # accurate box-box contacts (all objects are boxes)
                 enable_self_collision=False,  # boxes can't self-collide
-                iterations=15,               # constraint solver iters (default 50)
-                ls_iterations=10,            # line-search iters (default 50)
+                iterations=8,                # constraint solver iters (default 50)
+                ls_iterations=5,             # line-search iters (default 50)
                 use_hibernation=True,        # sleep resting objects
+                use_contact_island=True
             ),
         )
 
@@ -358,7 +359,7 @@ class BinEnv:
     def _compute_reward(self, state: dict) -> float:
         y = state['target_pos'][1]
         r = (BIN_D / 2 - y) / (BIN_D / 2 - EXIT_Y)
-        r = float(np.clip(r, 0, 1))
+        r = float(np.clip(r, 0, 2))
         n_dropped = sum(1 for i in range(len(self.obstacles))
                         if state['obstacle_pos'][i][1] < EXIT_Y)
         r -= 0.5 * n_dropped
@@ -367,7 +368,7 @@ class BinEnv:
     def _is_goal(self, state: dict) -> bool:
         if self._obstacles_dropped(state):
             return False
-        return float(state['target_pos'][1]) < EXIT_Y
+        return float(state['target_pos'][1]) <= EXIT_Y
 
     def is_goal(self, state: dict) -> bool:
         return self._is_goal(state)

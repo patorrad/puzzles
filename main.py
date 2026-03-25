@@ -50,7 +50,7 @@ def parse_args():
     p.add_argument('--show-during-planning', action='store_true')
     p.add_argument('--visualize-search', action='store_true')
     p.add_argument('--pause-search', action='store_true')
-    p.add_argument('--parallel-envs', type=int, default=0,
+    p.add_argument('--parallel-envs', type=int, default=8,
                    help='MCTS: parallel Genesis envs for batch evaluation (0=off)')
     p.add_argument('--no-replay', action='store_true')
     p.add_argument('--visualize', action='store_true',
@@ -469,15 +469,15 @@ def main():
                 atype = action['action_type']
                 print(f'  Step {step_i+1}: [{atype}]')
                 if atype == 'push_n':
-                    env.execute_ns_push(action['push_pos'], action['push_z'], step_delay=0.02)
+                    env.execute_ns_push(action['push_pos'], action['push_z'], step_delay=0.00)
                 elif atype == 'pull_s':
-                    env.execute_ns_pull(action['push_pos'], action['push_z'], step_delay=0.02)
+                    env.execute_ns_pull(action['push_pos'], action['push_z'], step_delay=0.00)
                 elif atype == 'push_e':
                     env.execute_ew_push(action['push_pos'], action['push_z'],
-                                        direction=+1, step_delay=0.02)
+                                        direction=+1, step_delay=0.00)
                 else:
                     env.execute_ew_push(action['push_pos'], action['push_z'],
-                                        direction=-1, step_delay=0.02)
+                                        direction=-1, step_delay=0.00)
             if env.show_viewer:
                 input('Press Enter to close viewer...')
 

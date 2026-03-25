@@ -63,9 +63,12 @@ class ParallelBinEnv:
                 gravity=(0, 0, -9.81),
                 box_box_detection=False,
                 enable_self_collision=False,
-                iterations=15,
-                ls_iterations=10,
+                # iterations=15,               # constraint solver iters (default 50)
+                # ls_iterations=10,            # line-search iters (default 50)
+                iterations=8,
+                ls_iterations=5,
                 use_hibernation=True,
+                use_contact_island=True
             ),
         )
 
@@ -272,7 +275,7 @@ class ParallelBinEnv:
 
     def _compute_reward(self, state: dict) -> float:
         y = state['target_pos'][1]
-        r = float(np.clip((BIN_D / 2 - y) / (BIN_D / 2 - EXIT_Y), 0, 1))
+        r = float(np.clip((BIN_D / 2 - y) / (BIN_D / 2 - EXIT_Y), 0, 2))
         n_dropped = sum(1 for i in range(len(self.obstacles))
                         if state['obstacle_pos'][i][1] < EXIT_Y)
         return r - 0.5 * n_dropped
