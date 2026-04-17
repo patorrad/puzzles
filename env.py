@@ -64,7 +64,8 @@ class BinEnv:
                  dt: float = 0.01, seed: int | None = None,
                  stackable: bool = False, friction: float = 1.0,
                  n_z_levels: int = 1,
-                 push_steps: int = 20, substeps: int = 4):
+                 push_steps: int = 20, substeps: int = 4,
+                 initial_positions: dict | None = None):
         self.n_obstacles = n_obstacles
         self.show_viewer = show_viewer
         self.friction = friction
@@ -73,6 +74,7 @@ class BinEnv:
         self.n_z_levels = n_z_levels
         self.push_steps = push_steps
         self.substeps = substeps
+        self.initial_positions = initial_positions  # optional {target:[x,y], obstacles:[[x,y],...]}
         self.rng = np.random.default_rng(seed)
 
         # Discrete z levels: floor height, one-box up, two-boxes up, …
@@ -198,30 +200,66 @@ class BinEnv:
     # ------------------------------------------------------------------
 
     def _place_objects(self):
-        """Randomly place objects inside the bin, optionally stacking them."""
+        """Place objects inside the bin.
+
+        If ``self.initial_positions`` is set, objects with explicit positions
+        are placed there; remaining objects are placed randomly.
+        ``initial_positions`` keys:
+            'target'    : [x, y]
+            'obstacles' : [[x, y], ...]  (len must equal n_obstacles if given)
+        """
+        fixed = self.initial_positions or {}
         margin = OBJ_SIZE * 0.7
         x_lo, x_hi = margin, BIN_W - margin
         y_lo, y_hi = margin, BIN_D - margin
 
         columns: list[tuple[float, float, int]] = []
-        all_objs = self.obstacles + [self.target]
 
-        for obj in all_objs:
+        # Place obstacles first so the target column list is consistent
+        for i, obs in enumerate(self.obstacles):
+            obs_positions = fixed.get('obstacles', [])
+            if i < len(obs_positions):
+                x, y = float(obs_positions[i][0]), float(obs_positions[i][1])
+                obs.set_pos([x, y, OBJ_H])
+                columns.append((x, y, 1))
+            else:
+                placed = False
+                if self.stackable and columns and self.rng.random() < 0.5:
+                    idx = self.rng.integers(len(columns))
+                    x, y, count = columns[idx]
+                    obs.set_pos([x, y, OBJ_H + OBJ_SIZE * count])
+                    columns[idx] = (x, y, count + 1)
+                    placed = True
+                if not placed:
+                    for _ in range(200):
+                        x = self.rng.uniform(x_lo, x_hi)
+                        y = self.rng.uniform(y_lo, y_hi)
+                        if all(np.hypot(x - cx, y - cy) > OBJ_SIZE * 1.5
+                               for cx, cy, _ in columns):
+                            obs.set_pos([x, y, OBJ_H])
+                            columns.append((x, y, 1))
+                            break
+
+        # Place target
+        if 'target' in fixed:
+            x, y = float(fixed['target'][0]), float(fixed['target'][1])
+            self.target.set_pos([x, y, OBJ_H])
+            columns.append((x, y, 1))
+        else:
             placed = False
             if self.stackable and columns and self.rng.random() < 0.5:
                 idx = self.rng.integers(len(columns))
                 x, y, count = columns[idx]
-                obj.set_pos([x, y, OBJ_H + OBJ_SIZE * count])
+                self.target.set_pos([x, y, OBJ_H + OBJ_SIZE * count])
                 columns[idx] = (x, y, count + 1)
                 placed = True
-
             if not placed:
                 for _ in range(200):
                     x = self.rng.uniform(x_lo, x_hi)
                     y = self.rng.uniform(y_lo, y_hi)
                     if all(np.hypot(x - cx, y - cy) > OBJ_SIZE * 1.5
                            for cx, cy, _ in columns):
-                        obj.set_pos([x, y, OBJ_H])
+                        self.target.set_pos([x, y, OBJ_H])
                         columns.append((x, y, 1))
                         break
 
@@ -362,12 +400,13 @@ class BinEnv:
         n_dropped = sum(1 for i in range(len(self.obstacles))
                         if state['obstacle_pos'][i][1] < EXIT_Y)
         r -= 0.5 * n_dropped
+        print(r)
         return r
 
     def _is_goal(self, state: dict) -> bool:
         if self._obstacles_dropped(state):
             return False
-        return float(state['target_pos'][1]) < EXIT_Y
+        return float(state['target_pos'][1]) <= EXIT_Y
 
     def is_goal(self, state: dict) -> bool:
         return self._is_goal(state)

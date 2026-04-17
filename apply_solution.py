@@ -8,10 +8,21 @@ Usage
 What it does
 ------------
 1. Reads solution.json produced by `main.py --save`.
-2. Writes puzzle_target.yaml and puzzle_obstacle_N.yaml under
+2. Transforms positions from puzzle frame → robot world frame (see below).
+3. Writes puzzle_target.yaml and puzzle_obstacle_N.yaml under
    <genesismpc>/conf/actors/.
-3. Rewrites <genesismpc>/examples/ur5_stick_stacked_blocks/config_ur.yaml,
-   replacing the actor list with the puzzle actors (keeping ur5_suction + goal).
+4. Rewrites config_ur.yaml replacing the actor list with the puzzle actors.
+5. Writes a <solution>_robot.json with all step positions in robot frame.
+
+Coordinate mapping
+------------------
+Puzzle frame          Robot world frame
+  x  (east–west)  →  y  (centered at 0)
+  y  (south–north →  x  (exit = BIN_EXIT_X, north wall = BIN_EXIT_X + BIN_D)
+  z  (from floor)  →  z  (table top + puzzle_z)
+
+North–south pushing (NS pusher) thus moves along the robot x-axis,
+which is the direction toward the robot base at x ≈ 0.208.
 """
 
 import argparse
@@ -21,10 +32,46 @@ import re
 
 # ── defaults ────────────────────────────────────────────────────────────────
 
-DEFAULT_SOLUTION  = os.path.join(os.path.dirname(__file__), "2_objects.json")
+DEFAULT_SOLUTION  = os.path.join(os.path.dirname(__file__), "solution_obs_3_simple_extraction.json")
 DEFAULT_GMPC_DIR  = os.path.join(os.path.dirname(__file__), "../genesismpc")
 ACTORS_SUBDIR     = "conf/actors"
-CONFIG_REL        = "examples/ur5_stick_stacked_blocks_value/config_ur.yaml"
+CONFIG_REL        = "examples/ur5_stick_stacked_blocks_stand/config_ur.yaml"
+
+# ── coordinate transform constants ──────────────────────────────────────────
+# table.yaml: pos_z=0.75, size_z=0.14  →  table top z = 0.75 + 0.07 = 0.82
+TABLE_TOP_Z = 0.72
+
+# Robot x-coordinate of the bin's south/exit face (puzzle y=0).
+# Robot base is at x=0.208; the bin exit should be a comfortable reach away.
+BIN_EXIT_X  = 0.40
+
+# ── coordinate transform ────────────────────────────────────────────────────
+
+def puzzle_to_robot_pos(pos: list, bin_w: float) -> list:
+    """
+    Transform a position from puzzle frame to robot world frame.
+
+    Puzzle (px, py, pz)  →  Robot (rx, ry, rz):
+        rx = BIN_EXIT_X + py      (south face of bin at BIN_EXIT_X)
+        ry = px - bin_w / 2       (bin centred at robot y = 0)
+        rz = TABLE_TOP_Z + pz
+    """
+    px, py, pz = pos
+    return [
+        BIN_EXIT_X + py,
+        px - bin_w / 2,
+        TABLE_TOP_Z + pz,
+    ]
+
+
+def puzzle_to_robot_size(size: list) -> list:
+    """
+    Swap the x and y extents of a box to match the axis remapping.
+    Puzzle size (sx, sy, sz)  →  Robot size (sy, sx, sz).
+    """
+    sx, sy, sz = size
+    return [sy, sx, sz]
+
 
 # ── actor YAML generation ────────────────────────────────────────────────────
 
@@ -84,6 +131,10 @@ def main():
 
     env_cfg   = sol["env_config"]
     actors_js = sol["actors"]          # list of actor dicts from save_solution()
+    bin_w     = env_cfg["BIN_W"]
+
+    def tpos(p): return puzzle_to_robot_pos(p, bin_w)
+    def tsz(s):  return puzzle_to_robot_size(s)
 
     gmpc = os.path.abspath(args.genesismpc_dir)
     actors_dir  = os.path.join(gmpc, ACTORS_SUBDIR)
@@ -98,8 +149,8 @@ def main():
         # prefix with "puzzle_" so they're easy to identify in the repo
         bare_name = actor["name"]
         aname     = f"puzzle_{bare_name}"
-        size      = actor["size"]
-        pos       = actor["init_pos"]
+        size      = tsz(actor["size"])
+        pos       = tpos(actor["init_pos"])
         color     = actor["color"]
         rho       = actor.get("rho", 500.0)   # default if not saved
         friction  = actor["friction"]
@@ -115,6 +166,30 @@ def main():
     # Keep ur5_suction + goal first, then puzzle objects
     full_actor_list = ["ur5_suction", "goal"] + puzzle_actor_names
     _patch_config(config_path, full_actor_list)
+
+    # Write robot-frame steps so the MPPI executor works in world coordinates
+    if "steps" in sol:
+        robot_steps = []
+        for step in sol["steps"]:
+            robot_steps.append({
+                "obj_idx":           step["obj_idx"],
+                "obj_name":          step["obj_name"],
+                "start_pos":         tpos(step["start_pos"]),
+                "start_quat":        step["start_quat"],
+                "end_pos":           tpos(step["end_pos"]),
+                "end_quat":          step["end_quat"],
+                "target_start_pos":  tpos(step["target_start_pos"]),
+                "target_start_quat": step["target_start_quat"],
+                "target_end_pos":    tpos(step["target_end_pos"]),
+                "target_end_quat":   step["target_end_quat"],
+            })
+        steps_path = os.path.splitext(args.solution)[0] + "_robot.json"
+        with open(steps_path, "w") as f:
+            json.dump({"steps": robot_steps,
+                       "frame": "robot_world",
+                       "BIN_EXIT_X": BIN_EXIT_X,
+                       "TABLE_TOP_Z": TABLE_TOP_Z}, f, indent=2)
+        print(f"\n  Robot-frame steps written to {steps_path}")
 
     print("\nDone. Actor names added to config:")
     for n in full_actor_list:

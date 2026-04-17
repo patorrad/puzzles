@@ -275,6 +275,7 @@ class ParallelBinEnv:
         r = float(np.clip((BIN_D / 2 - y) / (BIN_D / 2 - EXIT_Y), 0, 1))
         n_dropped = sum(1 for i in range(len(self.obstacles))
                         if state['obstacle_pos'][i][1] < EXIT_Y)
+        print(r - 0.5 * n_dropped)
         return r - 0.5 * n_dropped
 
     def _is_goal(self, state: dict) -> bool:

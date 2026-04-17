@@ -58,6 +58,15 @@ def parse_args():
     p.add_argument('--seed', type=int, default=None)
     p.add_argument('--save', type=str, default=None, metavar='FILE',
                    help='Save solution + env to a JSON file for the MPPI sim')
+    p.add_argument('--load-state', type=str, default=None, metavar='FILE',
+                   help='Load initial block positions from a solution JSON')
+    p.add_argument('--target-pos', type=float, nargs=2, default=None,
+                   metavar=('X', 'Y'),
+                   help='Fixed starting position of the target block (m)')
+    p.add_argument('--obstacle-pos', type=float, nargs=2, action='append',
+                   default=None, metavar=('X', 'Y'),
+                   dest='obstacle_pos',
+                   help='Fixed position for an obstacle (repeat for each obstacle)')
     # Internal: used when this script relaunches itself just for replay
     p.add_argument('--_replay-file', default=None, help=argparse.SUPPRESS)
     return p.parse_args()
@@ -326,6 +335,32 @@ def _launch_replay(plan, initial_state, args):
 
 
 # ---------------------------------------------------------------------------
+# Build initial_positions from CLI args / --load-state
+# ---------------------------------------------------------------------------
+
+def _build_initial_positions(args) -> dict | None:
+    """Return an initial_positions dict for BinEnv, or None for random placement."""
+    pos = {}
+
+    if args.load_state:
+        with open(args.load_state) as f:
+            data = json.load(f)
+        state = data.get('initial_state', {})
+        if 'target_pos' in state:
+            pos['target'] = state['target_pos'][:2]
+        if 'obstacle_pos' in state:
+            pos['obstacles'] = [p[:2] for p in state['obstacle_pos']]
+
+    # CLI flags override anything from --load-state
+    if args.target_pos is not None:
+        pos['target'] = args.target_pos
+    if args.obstacle_pos is not None:
+        pos['obstacles'] = args.obstacle_pos
+
+    return pos if pos else None
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -347,7 +382,13 @@ def main():
                    (args.show_during_planning or args.visualize_search
                     or args.pause_search or not args.no_replay))
 
+    initial_positions = _build_initial_positions(args)
     print(f'Building environment: {args.n_obstacles} obstacle(s), seed={args.seed}')
+    if initial_positions:
+        if 'target' in initial_positions:
+            print(f'  target pos: {initial_positions["target"]}')
+        for i, p in enumerate(initial_positions.get('obstacles', [])):
+            print(f'  obstacle_{i} pos: {p}')
     env = BinEnv(
         n_obstacles=args.n_obstacles,
         show_viewer=show_viewer,
@@ -357,6 +398,7 @@ def main():
         n_z_levels=args.n_z_levels,
         push_steps=args.push_steps,
         substeps=args.substeps,
+        initial_positions=initial_positions,
     )
     initial_state = env.get_state()
     print(f'Target start: {np.round(initial_state["target_pos"], 3)}')
