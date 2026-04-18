@@ -425,6 +425,8 @@ def main():
                 n_z_levels=args.n_z_levels,
                 push_steps=args.push_steps,
                 substeps=args.substeps,
+                bin_center=tuple(args.bin_center) if args.bin_center else None,
+                initial_positions=initial_positions,
             )
             print(f'Running Parallel MCTS ({args.n_simulations} sims, '
                   f'{args.parallel_envs} envs)...')
@@ -462,6 +464,8 @@ def main():
                 n_z_levels=args.n_z_levels,
                 push_steps=args.push_steps,
                 substeps=args.substeps,
+                bin_center=tuple(args.bin_center) if args.bin_center else None,
+                initial_positions=initial_positions,
             )
             print(f'Running Parallel RRT ({args.max_iter} batch iters × '
                   f'{args.parallel_envs} envs = '
