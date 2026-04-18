@@ -500,7 +500,20 @@ def main():
         print('No plan found.')
         return
 
-    print(f'Plan found: {len(plan)} actions')
+    # ---- verify the plan actually exits the target ----
+    from planner import _execute_action
+    env.set_state(initial_state)
+    goal_reached = False
+    for action in plan:
+        _, _, goal_reached = _execute_action(env, action)
+        if goal_reached:
+            break
+    if goal_reached:
+        print(f'Plan found and verified: {len(plan)} actions — target exits the bin.')
+    else:
+        print(f'Partial plan ({len(plan)} actions): target did not exit the bin '
+              f'(target y={env.get_state()["target_pos"][1]:.4f}, exit_y={env.exit_y:.4f}).')
+
     for i, a in enumerate(plan):
         print(f'  {i+1}. [{a["action_type"]}] obj={a["obj_idx"]} '
               f'pos={np.round(a["push_pos"], 3)} z={a["push_z"]:.3f}')

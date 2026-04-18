@@ -235,7 +235,8 @@ class RRTPusher:
                 return self._extract_path(new_node)
 
         if verbose:
-            print(f'  RRT finished. Best reward={best_reward:.3f}')
+            print(f'  RRT finished without reaching goal. Best reward={best_reward:.3f} '
+                  f'(returning best partial plan)')
 
         if draw and best_node.depth > 0:
             self._draw_solution(best_node)
@@ -420,7 +421,8 @@ class MCTSPusher:
                       f'best_reward={best_reward:.3f} | {elapsed:.1f}s')
 
         if verbose:
-            print(f'  MCTS finished. Best reward={best_reward:.3f}')
+            print(f'  MCTS finished without reaching goal. Best reward={best_reward:.3f} '
+                  f'(returning best partial plan)')
 
         self.root = root
         self.best_leaf = best_leaf
@@ -608,7 +610,8 @@ class ParallelRRTPusher(RRTPusher):
                       f'{elapsed:.1f}s')
 
         if verbose:
-            print(f'  RRT finished. Best reward={best_reward:.3f}')
+            print(f'  RRT finished without reaching goal. Best reward={best_reward:.3f} '
+                  f'(returning best partial plan)')
         self.tree = tree
         self.best_node = best_node
         return self._extract_path(best_node) if best_node.depth > 0 else None
