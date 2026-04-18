@@ -67,6 +67,9 @@ def parse_args():
                    default=None, metavar=('X', 'Y'),
                    dest='obstacle_pos',
                    help='Fixed position for an obstacle (repeat for each obstacle)')
+    p.add_argument('--bin-center', type=float, nargs=2, default=None,
+                   metavar=('X', 'Y'),
+                   help='Centre of the bin in world coordinates (default: 0.15 0.15)')
     # Internal: used when this script relaunches itself just for replay
     p.add_argument('--_replay-file', default=None, help=argparse.SUPPRESS)
     return p.parse_args()
@@ -259,6 +262,7 @@ def _do_replay(args):
         n_z_levels=args.n_z_levels,
         push_steps=args.push_steps,
         substeps=args.substeps,
+        bin_center=tuple(args.bin_center) if args.bin_center else None,
     )
 
     # Restore the exact initial state the planner used
@@ -328,6 +332,8 @@ def _launch_replay(plan, initial_state, args):
         cmd += ['--seed', str(args.seed)]
     if args.stackable:
         cmd += ['--stackable']
+    if args.bin_center is not None:
+        cmd += ['--bin-center', str(args.bin_center[0]), str(args.bin_center[1])]
 
     print(f'\nLaunching replay subprocess (plan saved to {path})...')
     subprocess.run(cmd)
@@ -399,6 +405,7 @@ def main():
         push_steps=args.push_steps,
         substeps=args.substeps,
         initial_positions=initial_positions,
+        bin_center=tuple(args.bin_center) if args.bin_center else None,
     )
     initial_state = env.get_state()
     print(f'Target start: {np.round(initial_state["target_pos"], 3)}')

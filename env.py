@@ -65,7 +65,8 @@ class BinEnv:
                  stackable: bool = False, friction: float = 1.0,
                  n_z_levels: int = 1,
                  push_steps: int = 20, substeps: int = 4,
-                 initial_positions: dict | None = None):
+                 initial_positions: dict | None = None,
+                 bin_center: tuple[float, float] | None = None):
         self.n_obstacles = n_obstacles
         self.show_viewer = show_viewer
         self.friction = friction
@@ -75,6 +76,15 @@ class BinEnv:
         self.push_steps = push_steps
         self.substeps = substeps
         self.initial_positions = initial_positions  # optional {target:[x,y], obstacles:[[x,y],...]}
+
+        # Offset from the default origin-anchored bin (corner at 0,0) to the
+        # desired centre position.  Defaults to the natural centre (BIN_W/2, BIN_D/2).
+        cx, cy = bin_center if bin_center is not None else (BIN_W / 2, BIN_D / 2)
+        self.ox = cx - BIN_W / 2   # x translation applied to all geometry
+        self.oy = cy - BIN_D / 2   # y translation applied to all geometry
+        self.exit_y = EXIT_Y + self.oy   # effective south-exit threshold
+        self._park = [BIN_W / 2 + self.ox, -2.0 + self.oy, OBJ_H]
+
         self.rng = np.random.default_rng(seed)
 
         # Discrete z levels: floor height, one-box up, two-boxes up, …
@@ -109,11 +119,13 @@ class BinEnv:
             morph=gs.morphs.Plane(),
         )
 
+        ox, oy = self.ox, self.oy
+
         # --- floor ---
         self.scene.add_entity(
             gs.morphs.Box(
                 size=(BIN_W + 2 * WALL_T, BIN_D + 2 * WALL_T, WALL_T),
-                pos=(BIN_W / 2, BIN_D / 2, -WALL_T / 2),
+                pos=(BIN_W / 2 + ox, BIN_D / 2 + oy, -WALL_T / 2),
                 fixed=True,
             ),
             surface=gs.surfaces.Default(color=(0.7, 0.6, 0.5)),
@@ -123,7 +135,7 @@ class BinEnv:
         self.scene.add_entity(
             gs.morphs.Box(
                 size=(BIN_W + 2 * WALL_T, WALL_T, BIN_H),
-                pos=(BIN_W / 2, BIN_D + WALL_T / 2, BIN_H / 2),
+                pos=(BIN_W / 2 + ox, BIN_D + WALL_T / 2 + oy, BIN_H / 2),
                 fixed=True,
             ),
             surface=gs.surfaces.Default(color=(0.5, 0.5, 0.8), opacity=0.35),
@@ -133,7 +145,7 @@ class BinEnv:
         self.scene.add_entity(
             gs.morphs.Box(
                 size=(WALL_T, BIN_D, BIN_H),
-                pos=(-WALL_T / 2, BIN_D / 2, BIN_H / 2),
+                pos=(-WALL_T / 2 + ox, BIN_D / 2 + oy, BIN_H / 2),
                 fixed=True,
             ),
             surface=gs.surfaces.Default(color=(0.5, 0.5, 0.8), opacity=0.35),
@@ -143,7 +155,7 @@ class BinEnv:
         self.scene.add_entity(
             gs.morphs.Box(
                 size=(WALL_T, BIN_D, BIN_H),
-                pos=(BIN_W + WALL_T / 2, BIN_D / 2, BIN_H / 2),
+                pos=(BIN_W + WALL_T / 2 + ox, BIN_D / 2 + oy, BIN_H / 2),
                 fixed=True,
             ),
             surface=gs.surfaces.Default(color=(0.5, 0.5, 0.8), opacity=0.35),
@@ -153,7 +165,7 @@ class BinEnv:
         self.pusher_ns = self.scene.add_entity(
             gs.morphs.Box(
                 size=(PUSHER_W, PUSHER_T, PUSHER_W),
-                pos=_PARK,
+                pos=self._park,
             ),
             material=gs.materials.Rigid(rho=10000, friction=self.friction),
             surface=gs.surfaces.Default(color=(0.2, 0.9, 0.2), opacity=0.8),
@@ -163,7 +175,7 @@ class BinEnv:
         self.pusher_ew = self.scene.add_entity(
             gs.morphs.Box(
                 size=(PUSHER_T, PUSHER_W, PUSHER_W),
-                pos=_PARK,
+                pos=self._park,
             ),
             material=gs.materials.Rigid(rho=10000, friction=self.friction),
             surface=gs.surfaces.Default(color=(0.9, 0.6, 0.1), opacity=0.8),
@@ -173,7 +185,7 @@ class BinEnv:
         self.target = self.scene.add_entity(
             gs.morphs.Box(
                 size=(OBJ_SIZE, OBJ_SIZE, OBJ_SIZE),
-                pos=(BIN_W / 2, BIN_D / 2, OBJ_H),
+                pos=(BIN_W / 2 + ox, BIN_D / 2 + oy, OBJ_H),
             ),
             material=gs.materials.Rigid(rho=50, friction=self.friction),
             surface=gs.surfaces.Default(color=(0.9, 0.2, 0.2), opacity=0.6),
@@ -185,7 +197,7 @@ class BinEnv:
             obs = self.scene.add_entity(
                 gs.morphs.Box(
                     size=(OBJ_SIZE, OBJ_SIZE, OBJ_SIZE),
-                    pos=(BIN_W / 2, BIN_D / 2, OBJ_H),
+                    pos=(BIN_W / 2 + ox, BIN_D / 2 + oy, OBJ_H),
                 ),
                 material=gs.materials.Rigid(rho=500, friction=self.friction),
                 surface=gs.surfaces.Default(color=(0.3, 0.5, 0.9), opacity=0.6),
@@ -210,8 +222,8 @@ class BinEnv:
         """
         fixed = self.initial_positions or {}
         margin = OBJ_SIZE * 0.7
-        x_lo, x_hi = margin, BIN_W - margin
-        y_lo, y_hi = margin, BIN_D - margin
+        x_lo, x_hi = margin + self.ox, BIN_W - margin + self.ox
+        y_lo, y_hi = margin + self.oy, BIN_D - margin + self.oy
 
         columns: list[tuple[float, float, int]] = []
 
@@ -278,9 +290,9 @@ class BinEnv:
 
     def _park_pushers(self):
         identity = [1.0, 0.0, 0.0, 0.0]
-        self.pusher_ns.set_pos(_PARK)
+        self.pusher_ns.set_pos(self._park)
         self.pusher_ns.set_quat(identity)
-        self.pusher_ew.set_pos(_PARK)
+        self.pusher_ew.set_pos(self._park)
         self.pusher_ew.set_quat(identity)
 
     def _zero_all_velocities(self):
@@ -372,7 +384,7 @@ class BinEnv:
                         pull_steps: int | None = None, step_delay: float = 0.0) -> tuple[dict, float, bool]:
         """Pull southward: pusher_ns hooks north of object, sweeps south to exit."""
         start = [pos_2d[0], pos_2d[1] + approach_dist, z]
-        end   = [pos_2d[0], EXIT_Y - approach_dist,     z]
+        end   = [pos_2d[0], self.exit_y - approach_dist, z]
         return self._stroke_and_eval(self.pusher_ns, start, end,
                                      pull_steps or self.push_steps, step_delay)
 
@@ -390,12 +402,13 @@ class BinEnv:
     # ------------------------------------------------------------------
 
     def _obstacles_dropped(self, state: dict) -> bool:
-        return any(state['obstacle_pos'][i][1] < EXIT_Y
+        return any(state['obstacle_pos'][i][1] < self.exit_y
                    for i in range(len(self.obstacles)))
 
     def _compute_reward(self, state: dict) -> float:
         y = state['target_pos'][1]
-        r = (BIN_D / 2 - y) / (BIN_D / 2 - EXIT_Y)
+        bin_center_y = BIN_D / 2 + self.oy
+        r = (bin_center_y - y) / (BIN_D / 2 - EXIT_Y)
         r = float(np.clip(r, 0, 1))
         n_dropped = sum(1 for i in range(len(self.obstacles))
                         if state['obstacle_pos'][i][1] < EXIT_Y)
@@ -406,7 +419,7 @@ class BinEnv:
     def _is_goal(self, state: dict) -> bool:
         if self._obstacles_dropped(state):
             return False
-        return float(state['target_pos'][1]) <= EXIT_Y
+        return float(state['target_pos'][1]) <= self.exit_y
 
     def is_goal(self, state: dict) -> bool:
         return self._is_goal(state)
