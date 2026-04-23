@@ -1,0 +1,38 @@
+defaults:
+  - simulator: genesis
+  - planner: mcts
+  - reward: default
+  - _self_
+
+# Environment
+n_obstacles: 2
+bin_size: null        # null = auto-scale with n_obstacles; set a float (e.g. 0.5) for a fixed size
+stackable: false
+difficult_spawn: false
+debug: true
+friction: 1.0
+n_z_levels: 1
+push_steps: 512
+substeps: 4
+wall_thickness: 0.25
+parallel_envs: 8
+seed: null
+
+# Runtime
+verify_threshold: 0.75   # fraction of envs that must succeed to accept a plan
+show_during_planning: false
+show_viewer: false
+no_replay: false
+visualize: false
+visualize_search: false
+pause_search: false
+save: null
+replay_file: null   # internal: set by subprocess replay launch
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  job_logging:
+    root:
+      level: WARNING

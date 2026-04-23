@@ -1,0 +1,10 @@
+# IsaacGym dependencies
+# Note: IsaacGym requires installation from NVIDIA's repository
+# Follow instructions at: https://developer.nvidia.com/isaac-gym
+
+# Other dependencies (if not already in environment)
+numpy
+torch
+tqdm
+wandb
+imageio[ffmpeg]

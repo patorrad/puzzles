@@ -120,7 +120,7 @@ def collect_dataset(n_episodes: int, n_sims: int,
     for ep in range(n_episodes):
         # New random layout each episode
         env.reset(seed=ep)
-        initial_state = env.get_state()
+        initial_state = env.get_state(0)
 
         planner = MCTSPusher(
             env=env,

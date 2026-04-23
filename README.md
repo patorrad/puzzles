@@ -28,11 +28,10 @@ Genesis 0.3.11, CUDA, PyTorch 2.9.1+cu130
 |---|---|
 | [env.py](env.py) | `BinEnv` — single Genesis scene, kinematic NS+EW pusher blades |
 | [planner.py](planner.py) | `MCTSPusher`, `RRTPusher`, `ParallelMCTSPusher`, `ParallelRRTPusher` |
-| [parallel_env.py](parallel_env.py) | `ParallelBinEnv` — one scene with `n_envs` parallel worlds |
 | [main.py](main.py) | CLI entry point — plan, replay, save solution |
 | [apply_solution.py](apply_solution.py) | Convert `solution.json` → genesismpc actor YAMLs + config |
 | [train_value.py](train_value.py) | Collect MCTS tree data and train an MLP value function | Not working at the moment
-| [viz.py](viz.py) | Matplotlib tree visualisation for MCTS / RRT |
+| [viz.py](viz.py) | Matplotlib tree visualisation for MCTS / RRT
 
 ## Running the planner
 
@@ -79,7 +78,7 @@ All environments share one CUDA kernel — evaluating N (state, action) pairs co
 the same wall-clock time as evaluating 1.
 
 ```python
-from parallel_env import ParallelBinEnv
+from simulators import ParallelBinEnv
 penv = ParallelBinEnv(n_envs=8, n_obstacles=2)
 results = penv.batch_evaluate([(state0, action0), ..., (state7, action7)])
 # results: list of (new_state, reward, done)

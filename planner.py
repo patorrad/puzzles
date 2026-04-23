@@ -1,19 +1,20 @@
 """
 Planners for the bin-clearing task.
 
-Parallel planner
-----------------
-ParallelMCTSPusher — wraps MCTSPusher with a ParallelBinEnv so that
-all children in _expand() and all rollouts in _rollout() are evaluated
-simultaneously on the GPU via a single scene.step() per physics tick.
-
-Both planners treat the Genesis simulation as a black-box forward model.
-State save/restore is done via env.get_state() / env.set_state().
+Unified single and parallel planners
+-------------------------------------
+All planners now work with both single-env (n_envs=1) and parallel-env (n_envs>1) modes.
+The environment's batch_evaluate() method is used for all action evaluation:
+  - Single mode: evaluates 1 (state, action) pair per call
+  - Parallel mode: evaluates up to n_envs pairs per call
 
 Planners
 --------
 RRTPusher  : Rapidly-Exploring Random Tree over push actions.
 MCTSPusher : Monte-Carlo Tree Search with UCB selection.
+
+Both planners treat the Genesis simulation as a black-box forward model.
+State save/restore is done via env.get_state() / env.set_state().
 
 Action space
 ------------
@@ -27,38 +28,23 @@ Each "action" is a push:
 import copy
 import math
 import time
-import numpy as np
+import torch
 from tqdm import tqdm
-from typing import Optional
 
-from env import BinEnv, BIN_W, BIN_D, EXIT_Y, OBJ_SIZE
+from simulators import SimulatorEnv
 
 
 # Action types and their sampling weights (bias_toward_exit=True)
 # pull_s gets highest weight since it directly moves target to exit
 _ACTION_TYPES  = ['push_n', 'pull_s', 'push_e', 'push_w']
-_WEIGHTS_BIASED = np.array([0.45, 0.45, 0.05, 0.05])
-_WEIGHTS_FLAT   = np.array([0.25, 0.25, 0.25, 0.25])
+_WEIGHTS_BIASED = torch.tensor([0.45, 0.45, 0.05, 0.05])
+_WEIGHTS_FLAT   = torch.tensor([0.25, 0.25, 0.25, 0.25])
 
 def _hash_action(action: dict) -> tuple:
     return action['action_type'], action['obj_idx'], tuple(action['push_pos'].tolist()), action['push_z']
 
-def _execute_action(env: BinEnv, action: dict) -> tuple[dict, float, bool]:
-    """Dispatch a sampled action to the appropriate env method."""
-    atype = action['action_type']
-    pos   = action['push_pos']
-    z     = action['push_z']
-    if atype == 'push_n':
-        return env.execute_ns_push(pos, z)
-    if atype == 'pull_s':
-        return env.execute_ns_pull(pos, z)
-    if atype == 'push_e':
-        return env.execute_ew_push(pos, z, direction=+1)
-    # push_w
-    return env.execute_ew_push(pos, z, direction=-1)
 
-
-def _sample_action(rng: np.random.Generator, state: dict, env: BinEnv,
+def _sample_action(state: dict, env: SimulatorEnv,
                    bias_toward_exit: bool = True, recurse_depth = 0, max_recurse_depth = 10, sampled_actions = {}) -> dict:
     """Sample a random action from the discrete action space.
 
@@ -71,34 +57,127 @@ def _sample_action(rng: np.random.Generator, state: dict, env: BinEnv,
 
     
     # Build (N+1, 3) position array: [target, obs0, obs1, ...]
-    all_pos_3d = np.vstack([
+    all_pos_3d = torch.stack([
         state['target_pos'][:3],
-        *(state['obstacle_pos'][i][:3] for i in range(len(env.obstacles))),
+        *(state['obstacle_pos'][i][:3] for i in range(env.n_obstacles)),
     ])
 
     # Bias toward acting on the target
-    obj_probs = np.ones(len(all_pos_3d))
+    obj_probs = torch.ones(len(all_pos_3d))
     obj_probs[0] *= len(all_pos_3d)
     obj_probs /= obj_probs.sum()
-    obj_idx = int(rng.choice(len(all_pos_3d), p=obj_probs))
+    obj_idx = torch.multinomial(obj_probs, 1).item()
 
     push_pos = all_pos_3d[obj_idx, :2]
 
     # Discrete z level
-    z_idx  = int(rng.integers(len(env.z_levels)))
+    z_idx  = torch.randint(len(env.z_levels), (1,)).item()
     push_z = env.z_levels[z_idx]
 
     # Sample action type
     weights = _WEIGHTS_BIASED if bias_toward_exit else _WEIGHTS_FLAT
-    atype   = _ACTION_TYPES[int(rng.choice(len(_ACTION_TYPES), p=weights))]
+    atype   = _ACTION_TYPES[torch.multinomial(weights, 1).item()]
     
     action = {'action_type': atype, 'obj_idx': obj_idx,
             'push_pos': push_pos, 'push_z': push_z}
 
     if recurse_depth < max_recurse_depth and _hash_action(action) in sampled_actions:
-        return _sample_action(rng, state, env, bias_toward_exit, recurse_depth + 1, max_recurse_depth, sampled_actions)
+        return _sample_action(state, env, bias_toward_exit, recurse_depth + 1, max_recurse_depth, sampled_actions)
     else:
         return action
+
+
+def _verify_plan(env: SimulatorEnv, plan: list[dict], root_state: dict,
+                 n_tries: int, verbose: bool = True) -> int:
+    """
+    Re-run a full plan n_tries times in parallel from root_state.
+
+    Each try occupies one env slot and executes every action in sequence via
+    batch_evaluate, so the cost is len(plan) batch calls regardless of n_tries.
+
+    The viewer is enabled for the duration of verification so the trajectory
+    can be watched, then restored to its previous state afterwards.
+
+    Returns the number of tries that reached the goal.
+    """
+    if verbose:
+        print(f'  Verifying plan ({n_tries} parallel tries)...')
+
+    prev_show_viewer = env.show_viewer
+    env.show_viewer = True
+
+    try:
+        states = [copy.deepcopy(root_state) for _ in range(n_tries)]
+
+        for action in plan:
+            pairs = [(state, action) for state in states]
+            results = env.batch_evaluate(pairs)
+            states = [new_state for new_state, _, _ in results]
+    finally:
+        env.show_viewer = prev_show_viewer
+
+    rewards = [env._compute_reward(s) for s in states]
+    avg_reward = sum(rewards) / len(rewards)
+    successes = sum(1 for s in states if env._is_goal(s))
+    if verbose:
+        print(f'  Verification: {successes}/{n_tries} succeeded. avg_reward={avg_reward:.3f}')
+    return successes, avg_reward
+
+
+# ===========================================================================
+# Planner base
+# ===========================================================================
+
+class _PlannerBase:
+    """Shared behaviour for RRTPusher and MCTSPusher."""
+
+    def __init__(self, env: SimulatorEnv, verify_threshold: float, seed: int | None):
+        self.env = env
+        self.verify_threshold = verify_threshold
+        self.batch_size = env.n_envs  # 1 for single, n_envs for parallel
+        if seed is not None:
+            torch.manual_seed(seed)
+
+    @staticmethod
+    def _extract_path(node) -> list[dict]:
+        path = []
+        while node is not None and node.action is not None:
+            path.append(node.action)
+            node = node.parent
+        path.reverse()
+        return path
+
+    @classmethod
+    def from_cfg(cls, env: SimulatorEnv, cfg, seed: int) -> '_PlannerBase':
+        """Instantiate the correct planner from a Hydra config."""
+        if cfg.planner.name == 'mcts':
+            return MCTSPusher(
+                env=env,
+                n_simulations=cfg.planner.n_simulations,
+                rollout_depth=cfg.planner.rollout_depth,
+                max_depth=cfg.planner.max_depth,
+                seed=seed,
+                verify_threshold=cfg.verify_threshold,
+            )
+        else:
+            return RRTPusher(
+                env=env,
+                max_iter=cfg.planner.max_iter,
+                max_depth=cfg.planner.max_depth,
+                seed=seed,
+                verify_threshold=cfg.verify_threshold,
+            )
+
+    def verify(self, plan: list[dict], initial_state: dict,
+               verbose: bool = True) -> tuple[int, float, float, bool]:
+        """Re-run plan self.batch_size times in parallel and return (successes, avg_reward, rate, passed)."""
+        successes, avg_reward = _verify_plan(
+            self.env, plan, initial_state,
+            n_tries=self.batch_size, verbose=verbose,
+        )
+        rate = successes / self.batch_size
+        passed = rate >= self.verify_threshold
+        return successes, avg_reward, rate, passed
 
 
 # ===========================================================================
@@ -118,32 +197,33 @@ class RRTNode:
         self.depth = depth
 
 
-class RRTPusher:
+class RRTPusher(_PlannerBase):
     """
     RRT-style planner for the bin-clearing task.
+    Works in both single-env (n_envs=1) and parallel-env (n_envs>1) modes.
 
-    At each iteration:
-      1. Sample a random state (goal-biased) or use current best node.
-      2. Find the nearest node in the tree (by target y distance).
-      3. Extend by simulating a random push from that node.
-      4. Add new node to tree if it improves position or is novel.
+    In each iteration (or batch of iterations for parallel mode):
+      1. Select node(s) to expand based on reward + exploration.
+      2. Sample random action(s).
+      3. Evaluate action(s) via env.batch_evaluate() (1 action for single, up to n_envs for parallel).
+      4. Add new node(s) to tree if they improve position or are novel.
 
     Parameters
     ----------
-    env : BinEnv
-    max_iter : int  - maximum tree expansions
+    env : BinEnv (with n_envs=1 for single mode or n_envs>1 for parallel)
+    max_iter : int - maximum iterations (batch iterations if parallel)
     max_depth : int - max push depth per branch
     goal_bias : float - probability of biasing toward the exit
     seed : int | None
     """
 
-    def __init__(self, env: BinEnv, max_iter: int = 200, max_depth: int = 15,
-                 goal_bias: float = 0.3, seed: int | None = 42):
-        self.env = env
+    def __init__(self, env: SimulatorEnv, max_iter: int = 200, max_depth: int = 15,
+                 goal_bias: float = 0.3, seed: int | None = 42,
+                 verify_threshold: float = 0.75):
+        super().__init__(env, verify_threshold, seed)
         self.max_iter = max_iter
         self.max_depth = max_depth
         self.goal_bias = goal_bias
-        self.rng = np.random.default_rng(seed)
         self.tree: list[RRTNode] = []   # populated after plan()
         self.best_node: RRTNode | None = None
 
@@ -154,95 +234,123 @@ class RRTPusher:
         """
         Run RRT and return the action sequence to the goal, or None if not found.
 
+        Handles both single-env (n_envs=1) and parallel (n_envs>1) modes:
+        - Single mode: expands one node per iteration, supports visualization
+        - Parallel mode: expands batch_size nodes per iteration, skips visualization
+
         Returns list of action dicts: [{'push_pos', 'push_dir', 'obj_idx'}, ...]
 
         Parameters
         ----------
         visualize_search : bool
-            If True and the env has a viewer open, draw the current branch being
-            explored in the Genesis viewer using debug draw tools.
+            If True and the env has a viewer open, draw the current
+            branch being explored in the Genesis viewer using debug draw tools.
             Yellow lines/spheres = established path to expand_node.
             Green sphere/line   = newly explored node.
         pause_each_iter : bool
-            If True, pause for Enter after drawing each branch (implies visualize_search).
+            If True, pause for Enter after drawing each branch (single mode only).
         """
         if pause_each_iter:
             visualize_search = True
 
+        if self.batch_size > 1 and (visualize_search or pause_each_iter):
+            if verbose:
+                print('  [RRT] visualize_search/pause_each_iter ignored in parallel mode.')
+
         if initial_state is None:
-            initial_state = self.env.get_state()
+            initial_state = self.env.get_state(0)
 
         root = RRTNode(state=copy.deepcopy(initial_state))
         tree: list[RRTNode] = [root]
         best_node = root
         best_reward = self.env._compute_reward(initial_state)
-        draw = visualize_search and self.env.show_viewer
+        draw = visualize_search and self.env.show_viewer and self.batch_size == 1
 
         t0 = time.time()
         for i in range(self.max_iter):
-            # --- select node to expand ---
-            if self.rng.random() < 0.3:
-                expand_node = best_node
-            else:
-                weights = np.array([n.reward + 0.01 for n in tree])
-                weights /= weights.sum()
-                expand_node = tree[self.rng.choice(len(tree), p=weights)]
+            # --- select batch_size nodes to expand ---
+            weights = torch.tensor([n.reward + 0.01 for n in tree])
+            weights /= weights.sum()
 
-            if expand_node.depth >= self.max_depth:
-                continue
+            expand_nodes = []
+            for _ in range(self.batch_size):
+                if torch.rand(1).item() < 0.3:
+                    expand_nodes.append(best_node)
+                else:
+                    expand_nodes.append(tree[torch.multinomial(weights, 1).item()])
 
-            # --- draw current branch before push ---
+            expand_nodes = [n if n.depth < self.max_depth else best_node
+                            for n in expand_nodes]
+
+            # --- draw current branch before push (single-env with viewer only) ---
             if draw:
-                self._draw_branch(expand_node)
+                self._draw_branch(expand_nodes[0])
                 if pause_each_iter:
-                    input(f'  iter {i+1}: depth={expand_node.depth} '
+                    input(f'  iter {i+1}: depth={expand_nodes[0].depth} '
                           f'best={best_reward:.3f}  [Enter to push]')
 
-            # --- sample action ---
-            action = _sample_action(self.rng, expand_node.state, self.env,
-                                    bias_toward_exit=True)
+            # --- sample one action per node and batch-evaluate ---
+            actions = [_sample_action(n.state, self.env, bias_toward_exit=True)
+                       for n in expand_nodes]
+            pairs = list(zip([n.state for n in expand_nodes], actions))
+            results = self.env.batch_evaluate(pairs)
 
-            # --- simulate ---
-            self.env.set_state(expand_node.state)
-            new_state, reward, done = _execute_action(self.env, action)
+            # --- incorporate results ---
+            goal_node = None
+            for expand_node, action, (new_state, reward, done) in \
+                    zip(expand_nodes, actions, results):
 
-            # Drop branches where obstacles fell out of the bin
-            if self.env._obstacles_dropped(new_state):
-                print("Branch dropped...:-()")
-                continue
+                if self.env._obstacles_dropped(new_state):
+                    if verbose and draw:
+                        print("Branch dropped...")
+                    continue
 
-            new_node = RRTNode(
-                state=copy.deepcopy(new_state),
-                action=action,
-                parent=expand_node,
-                reward=reward,
-                depth=expand_node.depth + 1,
-            )
-            tree.append(new_node)
+                new_node = RRTNode(
+                    state=copy.deepcopy(new_state),
+                    action=action,
+                    parent=expand_node,
+                    reward=reward,
+                    depth=expand_node.depth + 1,
+                )
+                tree.append(new_node)
 
-            # --- highlight new node ---
-            if draw:
-                self._draw_new_node(expand_node, new_node)
+                if draw:
+                    self._draw_new_node(expand_node, new_node)
 
-            if reward > best_reward:
-                best_reward = reward
-                best_node = new_node
+                if reward > best_reward:
+                    best_reward = reward
+                    best_node = new_node
+
+                if done and goal_node is None:
+                    goal_node = new_node
+
+            if goal_node is not None:
+                if verbose:
+                    print(f'  Goal reached at iter {i+1}!')
+                path = self._extract_path(goal_node)
+                verified, avg_reward = _verify_plan(self.env, path, root.state,
+                                                     self.batch_size, verbose)
+                if verified >= self.batch_size * self.verify_threshold:
+                    goal_node.reward = avg_reward
+                    if verbose:
+                        components = self.env.compute_reward_components(goal_node.state)
+                        print(f'  Plan final reward: {sum(components.values()):.3f}')
+                        if self.env.debug:
+                            for k, v in components.items():
+                                print(f'    {k}: {v:.4f}')
+                    if draw:
+                        self._draw_solution(goal_node)
+                    self.tree = tree
+                    self.best_node = goal_node
+                    return path
+                goal_node = None
 
             if verbose and (i + 1) % 20 == 0:
                 elapsed = time.time() - t0
-                target_y = new_state['target_pos'][1]
+                target_y = best_node.state['target_pos'][1]
                 print(f'  RRT iter {i+1:3d}/{self.max_iter} | '
                       f'tree={len(tree)} | best_reward={best_reward:.3f} | '
                       f'target_y={target_y:.3f} | {elapsed:.1f}s')
-
-            if done:
-                if verbose:
-                    print(f'  Goal reached at iter {i+1}!')
-                if draw:
-                    self._draw_solution(new_node)
-                self.tree = tree
-                self.best_node = new_node
-                return self._extract_path(new_node)
 
         if verbose:
             print(f'  RRT finished. Best reward={best_reward:.3f}')
@@ -270,6 +378,8 @@ class RRTPusher:
 
     def _draw_branch(self, node: RRTNode):
         """Clear debug objects and draw path from root to *node* in yellow."""
+        if not hasattr(self.env, 'scene'):
+            return
         scene = self.env.scene
         scene.clear_debug_objects()
         path = self._ancestor_path(node)
@@ -285,6 +395,8 @@ class RRTPusher:
 
     def _draw_new_node(self, parent: RRTNode, child: RRTNode):
         """Append a green sphere+line for the freshly explored node."""
+        if not hasattr(self.env, 'scene'):
+            return
         scene = self.env.scene
         green = (0.15, 0.90, 0.25, 1.0)
         p1 = parent.state['target_pos'].tolist()
@@ -295,6 +407,8 @@ class RRTPusher:
 
     def _draw_solution(self, node: RRTNode):
         """Redraw the final solution path in bright cyan."""
+        if not hasattr(self.env, 'scene'):
+            return
         scene = self.env.scene
         scene.clear_debug_objects()
         path = self._ancestor_path(node)
@@ -308,14 +422,6 @@ class RRTPusher:
                                     radius=0.012, color=cyan)
         scene.visualizer.update()
 
-    @staticmethod
-    def _extract_path(node: RRTNode) -> list[dict]:
-        path = []
-        while node.action is not None:
-            path.append(node.action)
-            node = node.parent
-        path.reverse()
-        return path
 
 
 # ===========================================================================
@@ -367,9 +473,13 @@ class MCTSNode:
         return len(self.children) == 0 or self.dead_end
 
 
-class MCTSPusher:
+class MCTSPusher(_PlannerBase):
     """
     MCTS planner for the bin-clearing task.
+
+    Handles both single-env (n_envs=1) and parallel (n_envs>1) modes:
+    - Single mode: operates on individual nodes, performs standard MCTS
+    - Parallel mode: operates on node batches, evaluates expansions and rollouts in parallel
 
     Uses UCB1 for tree policy and random rollouts for simulation.
 
@@ -384,17 +494,15 @@ class MCTSPusher:
     seed           : int | None
     """
 
-    def __init__(self, env: BinEnv, n_simulations: int = 100,
+    def __init__(self, env: SimulatorEnv, n_simulations: int = 100,
                  rollout_depth: int = 5, max_depth: int = 10,
-                 n_children: int = 5, c_ucb: float = 1.4,
-                 seed: int | None = 42):
-        self.env = env
+                 c_ucb: float = 1.4, seed: int | None = 42,
+                 verify_threshold: float = 0.75):
+        super().__init__(env, verify_threshold, seed)
         self.n_simulations = n_simulations
         self.rollout_depth = rollout_depth
         self.max_depth = max_depth
-        self.n_children = n_children
         self.c_ucb = c_ucb
-        self.rng = np.random.default_rng(seed)
         self.root: MCTSNode | None = None    # populated after plan()
         self.best_leaf: MCTSNode | None = None
 
@@ -402,47 +510,55 @@ class MCTSPusher:
              verbose: bool = True) -> list[dict] | None:
         """Run MCTS and return the best action sequence found."""
         if initial_state is None:
-            initial_state = self.env.get_state()
+            initial_state = self.env.get_state(0)
 
         root = MCTSNode(state=copy.deepcopy(initial_state), depth=0)
         best_leaf: MCTSNode | None = None
         best_reward = self.env._compute_reward(initial_state)
 
         t0 = time.time()
-        for sim_i in tqdm(range(self.n_simulations)):
-            # 1. Selection
-            node = self._select(root)
+        n_sims = self.n_simulations // self.batch_size
 
-            # 2. Expansion
-            node = self._expand(node)
+        pbar = tqdm(range(n_sims))
+        for sim_i in pbar:
+            nodes = self._select(root)
+            nodes = self._expand(nodes)
+            rollout_rewards = self._rollout(nodes)
+            self._backprop(nodes, rollout_rewards)
 
-            # 3. Rollout
-            rollout_reward = self._rollout(node)
+            goal_node = None
+            for node, reward in zip(nodes, rollout_rewards):
+                if reward > best_reward:
+                    best_reward = reward
+                    best_leaf = node
+                    pbar.set_postfix(best_reward=f'{best_reward:.3f}')
+                if node.done and goal_node is None:
+                    goal_node = node
 
-            # 4. Backpropagation
-            self._backprop(node, rollout_reward)
-
-            # Track best goal
-            if type(rollout_reward) != list:
-                rollout_reward = [rollout_reward]
-                node = [node]
-            
-            for rr, n in zip(rollout_reward, node):
-                if rr > best_reward:
-                    best_reward = rr
-                    best_leaf = n
-
-                if n.done:
+            if goal_node is not None:
+                if verbose:
+                    print(f'  MCTS: Goal reached at simulation {sim_i+1}!')
+                path = self._extract_path(goal_node)
+                verified, avg_reward = _verify_plan(self.env, path, root.state,
+                                                     self.batch_size, verbose)
+                if verified >= self.batch_size * self.verify_threshold:
+                    goal_node.total_reward = avg_reward
+                    goal_node.visits = 1
                     if verbose:
-                        print(f'  MCTS: Goal reached at simulation {sim_i+1}!')
+                        components = self.env.compute_reward_components(goal_node.state)
+                        print(f'  Plan final reward: {sum(components.values()):.3f}')
+                        if self.env.debug:
+                            for k, v in components.items():
+                                print(f'    {k}: {v:.4f}')
                     self.root = root
-                    self.best_leaf = n
-                    return self._extract_path(n)
+                    self.best_leaf = goal_node
+                    return path
+                goal_node = None
 
-            if verbose and (sim_i + 1) % 1 == 0:
+            if verbose and (sim_i + 1) % 10 == 0:
                 elapsed = time.time() - t0
-                print(f'  MCTS sim {sim_i+1:3d}/{self.n_simulations} | '
-                    f'best_reward={best_reward:.3f} | {elapsed:.1f}s')
+                print(f'  MCTS sim {sim_i+1:3d}/{n_sims} | '
+                      f'best_reward={best_reward:.3f} | {elapsed:.1f}s')
 
         if verbose:
             print(f'  MCTS finished. Best reward={best_reward:.3f}')
@@ -452,230 +568,13 @@ class MCTSPusher:
         return self._extract_path(best_leaf) if best_leaf and best_leaf.depth > 0 else None
 
     # ------------------------------------------------------------------
-    # MCTS phases
+    # MCTS phases - handle both single and parallel modes
     # ------------------------------------------------------------------
 
-    def _select(self, root: MCTSNode) -> MCTSNode:
-        """Traverse tree using UCB until a leaf or unexpanded node."""
-        node = root
-        while not node.is_leaf() and not node.done:
-            node = node.best_child(self.c_ucb)
-        return node
-
-    def _expand(self, node: MCTSNode) -> MCTSNode:
-        """Generate children by simulating n_children random pushes."""
-        if node.done or node.dead_end or node.depth < self.max_depth:
-            return node
-
-        for _ in range(self.n_children):
-            action = _sample_action(self.rng, node.state, self.env, sampled_actions=node.sampled_actions)
-            node.sampled_actions[_hash_action(action)] = True
-            self.env.set_state(node.state)
-            new_state, reward, done = _execute_action(self.env, action)
-            child = MCTSNode(
-                state=copy.deepcopy(new_state),
-                action=action,
-                parent=node,
-                depth=node.depth + 1,
-                done=done,
-                dead_end=self.env._obstacles_dropped(new_state),
-            )
-            child.total_reward = reward
-            child.visits = 1
-            node.children.append(child)
-
-        if node.children:
-            # Return the most promising child
-            return max(node.children, key=lambda c: c.mean_reward)
-        return node
-
-    def _rollout(self, node: MCTSNode) -> float:
-        """Random rollout from node's state for rollout_depth steps."""
-        if node.done:
-            return 1.0
-        if node.dead_end:
-            return self.env._compute_reward(node.state)  # already penalized
-
-        self.env.set_state(node.state)
-        state = node.state
-        best_r = self.env._compute_reward(state)
-
-        for _ in range(self.rollout_depth):
-            action = _sample_action(self.rng, state, self.env)
-            state, reward, done = _execute_action(self.env, action)
-            if self.env._obstacles_dropped(state):
-                return reward  # penalized reward; stop rollout
-            best_r = max(best_r, reward)
-            if done:
-                return 1.0
-
-        return best_r
-
-    def _backprop(self, node: MCTSNode, reward: float):
-        """Propagate reward up to root."""
-        while node is not None:
-            node.visits += 1
-            node.total_reward += reward
-            node = node.parent
-
-    # ------------------------------------------------------------------
-    # Path extraction
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _extract_path(node: MCTSNode) -> list[dict]:
-        path = []
-        while node is not None and node.action is not None:
-            path.append(node.action)
-            node = node.parent
-        path.reverse()
-        return path
-
-
-# ===========================================================================
-# Parallel RRT — batch-expands n_envs tree nodes simultaneously.
-# ===========================================================================
-
-class ParallelRRTPusher(RRTPusher):
-    """
-    RRT that expands n_envs nodes per iteration using ParallelBinEnv.
-
-    Each batch iteration selects n_envs nodes, samples one action each,
-    evaluates them all in one scene.step() sweep, then adds the results
-    to the tree. max_iter counts batch iterations, so total evaluations
-    = max_iter × n_envs.
-
-    Parameters
-    ----------
-    env          : BinEnv          – used for action sampling & z_levels
-    parallel_env : ParallelBinEnv  – executes physics in parallel
-    All other kwargs forwarded to RRTPusher.
-    """
-
-    def __init__(self, env, parallel_env, **kwargs):
-        super().__init__(env=env, **kwargs)
-        self.penv = parallel_env
-
-    def plan(self, initial_state=None, verbose: bool = True,
-             visualize_search: bool = False,
-             pause_each_iter: bool = False) -> list[dict] | None:
-
-        if visualize_search or pause_each_iter:
-            print('  [ParallelRRT] visualize_search/pause_each_iter ignored in parallel mode.')
-
-        if initial_state is None:
-            initial_state = self.env.get_state()
-
-        root = RRTNode(state=copy.deepcopy(initial_state))
-        tree: list[RRTNode] = [root]
-        best_node = root
-        best_reward = self.penv._compute_reward(initial_state)
-        k = self.penv.n_envs
-
-        t0 = time.time()
-        for i in range(self.max_iter):
-            # --- select k nodes to expand (same policy as single-env RRT) ---
-            weights = np.array([n.reward + 0.01 for n in tree])
-            weights /= weights.sum()
-
-            expand_nodes = []
-            for _ in range(k):
-                if self.rng.random() < 0.3:
-                    expand_nodes.append(best_node)
-                else:
-                    expand_nodes.append(
-                        tree[self.rng.choice(len(tree), p=weights)])
-
-            # Filter nodes that have hit max_depth (sample replacements)
-            expand_nodes = [
-                n if n.depth < self.max_depth else best_node
-                for n in expand_nodes
-            ]
-
-            # --- sample one action per node ---
-            actions = [
-                _sample_action(self.rng, n.state, self.env, bias_toward_exit=True)
-                for n in expand_nodes
-            ]
-
-            # --- batch evaluate all k expansions simultaneously ---
-            pairs = list(zip([n.state for n in expand_nodes], actions))
-            results = self.penv.batch_evaluate(pairs)
-
-            # --- incorporate results ---
-            for expand_node, action, (new_state, reward, done) in \
-                    zip(expand_nodes, actions, results):
-
-                if self.penv._obstacles_dropped(new_state):
-                    continue
-
-                new_node = RRTNode(
-                    state=copy.deepcopy(new_state),
-                    action=action,
-                    parent=expand_node,
-                    reward=reward,
-                    depth=expand_node.depth + 1,
-                )
-                tree.append(new_node)
-
-                if reward > best_reward:
-                    best_reward = reward
-                    best_node = new_node
-
-                if done:
-                    if verbose:
-                        print(f'  Goal reached at batch {i+1}! '
-                              f'(~{(i+1)*k} total evals)')
-                    self.tree = tree
-                    self.best_node = new_node
-                    return self._extract_path(new_node)
-
-            if verbose and (i + 1) % 10 == 0:
-                elapsed = time.time() - t0
-                print(f'  RRT batch {i+1:3d}/{self.max_iter} | '
-                      f'tree={len(tree)} | best_reward={best_reward:.3f} | '
-                      f'{elapsed:.1f}s')
-
-        if verbose:
-            print(f'  RRT finished. Best reward={best_reward:.3f}')
-        self.tree = tree
-        self.best_node = best_node
-        return self._extract_path(best_node) if best_node.depth > 0 else None
-
-
-# ===========================================================================
-# Parallel MCTS — uses ParallelBinEnv.batch_evaluate() for GPU-parallel
-# expansion and rollouts.
-# ===========================================================================
-
-class ParallelMCTSPusher(MCTSPusher):
-    """
-    Drop-in replacement for MCTSPusher that evaluates all children and
-    rollouts in parallel using a ParallelBinEnv.
-
-    Expansion:  n_children actions → one batch_evaluate call (all on GPU).
-    Rollout:    n_rollouts independent random rollouts from the same node,
-                evaluated depth-by-depth in parallel; returns best reward.
-
-    Parameters
-    ----------
-    env          : BinEnv          – used for action sampling & z_levels
-    parallel_env : ParallelBinEnv  – executes physics in parallel
-    n_rollouts   : int             – parallel rollouts per node (≤ parallel_env.n_envs)
-    All other kwargs forwarded to MCTSPusher.
-    """
-
-    def __init__(self, env, parallel_env, n_rollouts: int = 4, **kwargs):
-        super().__init__(env=env, **kwargs)
-        self.penv      = parallel_env
-        self.envs = self.penv.n_envs
-        self.n_rollouts = min(n_rollouts, parallel_env.n_envs)
-
-    def _select(self, root: MCTSNode) -> MCTSNode:
-
-        """Traverse tree using UCB until a leaf or unexpanded node."""
+    def _select(self, root: MCTSNode) -> list[MCTSNode]:
+        """Traverse tree using UCB until a leaf or unexpanded node for each slot."""
         nodes = []
-        for _ in range(self.envs):
+        for _ in range(self.batch_size):
             node = root
             while not node.is_leaf() and not node.done:
                 node = node.best_child(self.c_ucb)
@@ -685,70 +584,58 @@ class ParallelMCTSPusher(MCTSPusher):
             node.reset_virtual_visits()
         return nodes
 
-    # ------------------------------------------------------------------
-    # Override: parallel expansion
-    # ------------------------------------------------------------------
-
-
     def _expand(self, nodes: list[MCTSNode]) -> list[MCTSNode]:
-        """Sample n_children actions, evaluate ALL in one batch call."""
-        
-        actions = [_sample_action(self.rng, n.state, self.env)
-                   for n in nodes]
-        pairs   = [(n.state, a) for (n,a) in zip(nodes, actions)]
-        results = self.penv.batch_evaluate(pairs)   # ← single GPU batch
+        """Generate n_children children per node via batch_evaluate, return best child per node."""
+        pairs: list[tuple[dict, dict]] = []
+        node_for_pair: list[MCTSNode] = []
 
-        for node, action, (new_state, reward, done) in zip(nodes, actions, results):
-            child = MCTSNode(
-                state    = copy.deepcopy(new_state),
-                action   = action,
-                parent   = node,
-                depth    = node.depth + 1,
-                done     = done,
-                dead_end = self.penv._obstacles_dropped(new_state),
-            )
-            child.total_reward = reward
-            child.visits       = 1
-            node.children.append(child)
-
-            
-        expanded_nodes = []
         for node in nodes:
-            if node.done or node.dead_end or node.depth < self.max_depth:
-                expanded_nodes.append(node)
-            elif node.children:
-                expanded_nodes.append(max(node.children, key=lambda c: c.mean_reward))
-            else:
-                expanded_nodes.append(child)
-        return expanded_nodes
+            if node.done or node.dead_end or node.depth >= self.max_depth:
+                continue
+            for _ in range(self.env.n_envs):
+                action = _sample_action(node.state, self.env,
+                                        sampled_actions=node.sampled_actions)
+                node.sampled_actions[_hash_action(action)] = True
+                pairs.append((node.state, action))
+                node_for_pair.append(node)
 
-    # ------------------------------------------------------------------
-    # Override: parallel rollouts
-    # ------------------------------------------------------------------
+        if pairs:
+            results = self.env.batch_evaluate(pairs)
+            for parent_node, (_, action), (new_state, reward, done) in \
+                    zip(node_for_pair, pairs, results):
+                child = MCTSNode(
+                    state=copy.deepcopy(new_state),
+                    action=action,
+                    parent=parent_node,
+                    depth=parent_node.depth + 1,
+                    done=done,
+                    dead_end=self.env._obstacles_dropped(new_state),
+                )
+                child.total_reward = reward
+                child.visits = 1
+                parent_node.children.append(child)
+
+        expanded = []
+        for node in nodes:
+            if node.done or node.dead_end or node.depth >= self.max_depth:
+                expanded.append(node)
+            elif node.children:
+                expanded.append(max(node.children, key=lambda c: c.mean_reward))
+            else:
+                expanded.append(node)
+        return expanded
 
     def _rollout(self, nodes: list[MCTSNode]) -> list[float]:
-        """
-        Run n_rollouts independent random rollouts from node.state in
-        parallel, depth-by-depth. Returns the best reward seen.
-
-        Each rollout depth level is one batch_evaluate call, so the total
-        GPU work is rollout_depth × batch calls (vs rollout_depth × n_rollouts
-        sequential calls without parallelism).
-        """
-        rewards = []
-
-
-        # All rollouts start from the same node state
-        states  = [copy.deepcopy(n.state) for n in nodes]
-        active  = list(range(len(states)))   # indices still running
-        best_rewards = [self.penv._compute_reward(s) for s in states]
+        """Random rollout from each node's state for rollout_depth steps."""
+        states = [copy.deepcopy(n.state) for n in nodes]
+        active = list(range(len(states)))
+        best_rewards = [self.env._compute_reward(s) for s in states]
 
         for _ in range(self.rollout_depth):
             if not active:
                 break
-            pairs  = [(states[i], _sample_action(self.rng, states[i], self.env))
-                       for i in active]
-            results = self.penv.batch_evaluate(pairs)
+            pairs = [(states[i], _sample_action(states[i], self.env)) for i in active]
+            results = self.env.batch_evaluate(pairs)
 
             still_active = []
             for slot, i in enumerate(active):
@@ -756,36 +643,39 @@ class ParallelMCTSPusher(MCTSPusher):
                 states[i] = new_state
                 best_rewards[i] = max(best_rewards[i], reward)
                 if done:
-                     best_rewards[i] = 1.0
-                if not self.penv._obstacles_dropped(new_state):
+                    best_rewards[i] = 1.0
+                if not self.env._obstacles_dropped(new_state):
                     still_active.append(i)
             active = still_active
 
-        for i in range(len(nodes)):
-            if nodes[i].done:
+        for i, node in enumerate(nodes):
+            if node.done:
                 best_rewards[i] = 1.0
-            if nodes[i].dead_end:
-                best_rewards[i] = self.penv._compute_reward(nodes[0].state)
+            if node.dead_end:
+                best_rewards[i] = self.env._compute_reward(node.state)
 
         return best_rewards
 
-
     def _backprop(self, nodes: list[MCTSNode], rewards: list[float]):
-        """Propagate reward up to root."""
-
-        non_duplicate_nodes = list()
-        non_duplicate_rewards = list()
-
-        for node, reward in zip(nodes, rewards):
-            if node in non_duplicate_nodes:
-                node_idx = non_duplicate_nodes.index(node)
-                non_duplicate_rewards[node_idx] = max(reward, non_duplicate_rewards[node_idx])
+        """Propagate rewards up to root, deduplicating nodes that appear multiple times."""
+        seen: dict[int, tuple[MCTSNode, float]] = {}
+        for n, r in zip(nodes, rewards):
+            nid = id(n)
+            if nid in seen:
+                seen[nid] = (n, max(r, seen[nid][1]))
             else:
-                non_duplicate_nodes.append(node)
-                non_duplicate_rewards.append(reward)
+                seen[nid] = (n, r)
 
-        for node, reward in zip(non_duplicate_nodes, non_duplicate_rewards):
-            while node is not None:
-                node.visits += 1
-                node.total_reward += reward
-                node = node.parent
+        for n, r in seen.values():
+            while n is not None:
+                n.visits += 1
+                n.total_reward += r
+                n = n.parent
+
+    # ------------------------------------------------------------------
+    # Path extraction
+    # ------------------------------------------------------------------
+
+
+
+

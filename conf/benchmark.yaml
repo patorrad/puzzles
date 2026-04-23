@@ -1,0 +1,30 @@
+defaults:
+  - config
+  - override simulator: isaaclab
+  - _self_
+# Environment
+n_obstacles: 10
+parallel_envs: 16
+difficult_spawn: true
+
+# Benchmark
+seed: 0
+n_runs: 20
+base_seed: 0          # run i uses seed = base_seed + i
+
+# Video (IsaacLab only)
+record_video: true
+video_dir: "benchmark_videos"
+
+# WandB
+wandb_project: "bin-clearing-benchmark"
+wandb_entity: null    # set to your username/org, or leave null for default
+wandb_run_name: null  # auto-generated if null
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  job_logging:
+    root:
+      level: WARNING

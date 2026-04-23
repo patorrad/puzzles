@@ -1,0 +1,9 @@
+defaults:
+  - config
+  - override simulator: isaaclab
+  - _self_
+# Environment
+n_obstacles: 40
+parallel_envs: 32
+difficult_spawn: true
+# Runtime

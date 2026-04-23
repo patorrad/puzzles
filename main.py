@@ -1,90 +1,47 @@
 """
-main.py  –  Bin-clearing planning demo with Genesis.
+main.py  –  Bin-clearing planning demo.
 
 Usage
 -----
-# Run MCTS planner (headless, then replay with viewer):
-python main.py --planner mcts
+# Run MCTS with Genesis (defaults):
+python main.py
 
-# Run RRT planner:
-python main.py --planner rrt
+# Switch simulator or planner via config group override:
+python main.py simulator=isaaclab
+python main.py planner=rrt
 
-# Parallel MCTS (8 envs evaluated simultaneously on GPU):
-python main.py --planner mcts --parallel-envs 8
+# Override individual values:
+python main.py n_obstacles=3 wall_thickness=0.1 seed=42
 
-Options
--------
---planner            : mcts | rrt  (default: mcts)
---n-obstacles        : int (default: 2)
---n-simulations      : MCTS simulations (default: 80)
---max-iter           : RRT iterations (default: 150)
---show-during-planning : open viewer while planning (single-env mode only)
---parallel-envs N    : MCTS parallel GPU environments (0 = disabled)
---no-replay          : skip replay of solution
---seed               : random seed
+# Parallel MCTS:
+python main.py parallel_envs=8
+
+# Show viewer during planning:
+python main.py show_during_planning=true
+
+# Full example:
+python main.py simulator=isaaclab planner=mcts n_obstacles=2 wall_thickness=0.15
 """
 
-import argparse
-import json
 import os
-import subprocess
 import sys
+import json
+import subprocess
 import tempfile
 import time
-import numpy as np
 
+import torch
+import hydra
+from omegaconf import DictConfig
 
-def parse_args():
-    p = argparse.ArgumentParser()
-    p.add_argument('--planner', default='mcts', choices=['mcts', 'rrt'])
-    p.add_argument('--n-obstacles', type=int, default=2)
-    p.add_argument('--n-simulations', type=int, default=80,
-                   help='MCTS: number of simulations')
-    p.add_argument('--max-iter', type=int, default=150,
-                   help='RRT: maximum iterations')
-    p.add_argument('--stackable', action='store_true')
-    p.add_argument('--friction', type=float, default=1.0)
-    p.add_argument('--n-z-levels', type=int, default=1)
-    p.add_argument('--push-steps', type=int, default=80)
-    p.add_argument('--substeps', type=int, default=4)
-    p.add_argument('--show-during-planning', action='store_true')
-    p.add_argument('--visualize-search', action='store_true')
-    p.add_argument('--pause-search', action='store_true')
-    p.add_argument('--parallel-envs', type=int, default=8,
-                   help='MCTS: parallel Genesis envs for batch evaluation (0=off)')
-    p.add_argument('--no-replay', action='store_true')
-    p.add_argument('--visualize', action='store_true',
-                   help='Show matplotlib tree after planning')
-    p.add_argument('--seed', type=int, default=None)
-    p.add_argument('--save', type=str, default=None, metavar='FILE',
-                   help='Save solution + env to a JSON file for the MPPI sim')
-    # Internal: used when this script relaunches itself just for replay
-    p.add_argument('--_replay-file', default=None, help=argparse.SUPPRESS)
-    return p.parse_args()
+from simulators import build_env
 
 
 # ---------------------------------------------------------------------------
-# Replay (runs in a subprocess with a clean Genesis context)
+# Replay helpers
 # ---------------------------------------------------------------------------
 
 def _simulate_plan_steps(env, plan: list[dict], initial_state: dict) -> list[dict]:
-    """
-    Re-simulate each action and record:
-      - start/end pose of the displaced object
-      - start/end pose of the target (for full state visibility at every step)
-
-    Returns a list of dicts with:
-        obj_idx      : which object moved
-        obj_name     : 'target' or 'obstacle_N'
-        start_pos    : [x, y, z] of displaced object before push
-        start_quat   : [w, x, y, z] of displaced object before push
-        end_pos      : [x, y, z] of displaced object after push
-        end_quat     : [w, x, y, z] of displaced object after push
-        target_start_pos  : [x, y, z] of target before push
-        target_start_quat : [w, x, y, z] of target before push
-        target_end_pos    : [x, y, z] of target after push
-        target_end_quat   : [w, x, y, z] of target after push
-    """
     from planner import _execute_action
 
     steps = []
@@ -92,10 +49,9 @@ def _simulate_plan_steps(env, plan: list[dict], initial_state: dict) -> list[dic
     env.set_state(state)
 
     for action in plan:
-        obj_idx = int(action['obj_idx'])
+        obj_idx  = int(action['obj_idx'])
         obj_name = 'target' if obj_idx == 0 else f'obstacle_{obj_idx - 1}'
 
-        # Poses before
         if obj_idx == 0:
             start_pos  = state['target_pos'].tolist()
             start_quat = state['target_quat'].tolist()
@@ -108,7 +64,6 @@ def _simulate_plan_steps(env, plan: list[dict], initial_state: dict) -> list[dic
         new_state, _, _ = _execute_action(env, action)
         state = new_state
 
-        # Poses after
         if obj_idx == 0:
             end_pos  = state['target_pos'].tolist()
             end_quat = state['target_quat'].tolist()
@@ -134,71 +89,51 @@ def _simulate_plan_steps(env, plan: list[dict], initial_state: dict) -> list[dic
     return steps
 
 
-def save_solution(path: str, plan: list[dict], initial_state: dict, args, env):
-    """
-    Export the plan and environment to JSON for the MPPI robotics simulator.
+def save_solution(path: str, plan: list[dict], initial_state: dict,
+                  cfg: DictConfig, env):
+    BIN_W    = env.bin_w
+    BIN_D    = env.bin_d
+    BIN_H    = 0.5
+    OBJ_SIZE = 0.08
+    OBJ_H    = OBJ_SIZE / 2
+    EXIT_Y   = -0.05
+    PUSHER_T = 0.012
+    PUSHER_W = OBJ_SIZE * 0.88
+    wt       = cfg.wall_thickness
 
-    Schema
-    ------
-    env_config      : bin/object dimensions, friction
-    initial_state   : target and obstacle poses (pos + quat)
-    actors          : GenesisWrapper-compatible ActorWrapper dicts for each
-                      object (target + obstacles), ready to drop into a scene
-    plan            : action sequence (action_type, push_pos, push_z, obj_idx)
-    steps           : per-action start/end pose of the displaced object
-    """
-    from env import (BIN_W, BIN_D, BIN_H, WALL_T, OBJ_SIZE, OBJ_H,
-                     PUSHER_T, PUSHER_W, EXIT_Y)
-
-    # ActorWrapper-compatible dicts (matches GenesisWrapper's ActorWrapper fields)
-    def make_actor(name: str, size: list, pos: list, color: list,
-                   fixed: bool = False, rho: float = 500.0) -> dict:
+    def make_actor(name, size, pos, color, fixed=False, rho=500.0):
         return {
-            'type':     'Box',
-            'name':     name,
+            'type': 'Box', 'name': name,
             'init_pos': [float(v) for v in pos],
             'init_ori': [0.0, 0.0, 0.0, 1.0],
-            'size':     [float(v) for v in size],
-            'rho':      rho,
-            'friction': float(args.friction),
-            'fixed':    fixed,
-            'color':    color,
+            'size': [float(v) for v in size],
+            'rho': rho, 'friction': float(cfg.friction),
+            'fixed': fixed, 'color': color,
         }
 
-    obj_size  = [float(OBJ_SIZE)] * 3
-    wall_color = [0.5, 0.5, 0.8]
+    wall_color  = [0.5, 0.5, 0.8]
     floor_color = [0.7, 0.6, 0.5]
-
     actors = [
-        # movable objects
-        make_actor('target', obj_size, initial_state['target_pos'].tolist(),
+        make_actor('target', [OBJ_SIZE]*3, initial_state['target_pos'].tolist(),
                    [0.9, 0.2, 0.2], rho=50.0),
-        *[make_actor(f'obstacle_{i}', obj_size, pos.tolist(), [0.3, 0.5, 0.9])
+        *[make_actor(f'obstacle_{i}', [OBJ_SIZE]*3, pos.tolist(), [0.3, 0.5, 0.9])
           for i, pos in enumerate(initial_state['obstacle_pos'])],
-        # static bin geometry
-        make_actor('floor', [BIN_W + 2*WALL_T, BIN_D + 2*WALL_T, WALL_T],
-                   [BIN_W/2, BIN_D/2, -WALL_T/2], floor_color, fixed=True),
-        make_actor('wall_north', [BIN_W + 2*WALL_T, WALL_T, BIN_H],
-                   [BIN_W/2, BIN_D + WALL_T/2, BIN_H/2], wall_color, fixed=True),
-        make_actor('wall_west', [WALL_T, BIN_D, BIN_H],
-                   [-WALL_T/2, BIN_D/2, BIN_H/2], wall_color, fixed=True),
-        make_actor('wall_east', [WALL_T, BIN_D, BIN_H],
-                   [BIN_W + WALL_T/2, BIN_D/2, BIN_H/2], wall_color, fixed=True),
+        make_actor('floor', [BIN_W+2*wt, BIN_D+2*wt, wt],
+                   [BIN_W/2, BIN_D/2, -wt/2], floor_color, fixed=True),
+        make_actor('wall_north', [BIN_W+2*wt, wt, BIN_H],
+                   [BIN_W/2, BIN_D+wt/2, BIN_H/2], wall_color, fixed=True),
+        make_actor('wall_west',  [wt, BIN_D, BIN_H],
+                   [-wt/2, BIN_D/2, BIN_H/2], wall_color, fixed=True),
+        make_actor('wall_east',  [wt, BIN_D, BIN_H],
+                   [BIN_W+wt/2, BIN_D/2, BIN_H/2], wall_color, fixed=True),
     ]
 
     data = {
         'env_config': {
-            'BIN_W':      float(BIN_W),
-            'BIN_D':      float(BIN_D),
-            'BIN_H':      float(BIN_H),
-            'WALL_T':     float(WALL_T),
-            'OBJ_SIZE':   float(OBJ_SIZE),
-            'OBJ_H':      float(OBJ_H),
-            'EXIT_Y':     float(EXIT_Y),
-            'PUSHER_T':   float(PUSHER_T),
-            'PUSHER_W':   float(PUSHER_W),
-            'friction':   float(args.friction),
-            'n_obstacles': args.n_obstacles,
+            'BIN_W': BIN_W, 'BIN_D': BIN_D, 'BIN_H': BIN_H,
+            'WALL_T': wt, 'OBJ_SIZE': OBJ_SIZE, 'OBJ_H': OBJ_H,
+            'EXIT_Y': EXIT_Y, 'PUSHER_T': PUSHER_T, 'PUSHER_W': PUSHER_W,
+            'friction': float(cfg.friction), 'n_obstacles': cfg.n_obstacles,
         },
         'initial_state': {
             'target_pos':    initial_state['target_pos'].tolist(),
@@ -208,12 +143,8 @@ def save_solution(path: str, plan: list[dict], initial_state: dict, args, env):
         },
         'actors': actors,
         'plan': [
-            {
-                'action_type': a['action_type'],
-                'obj_idx':     int(a['obj_idx']),
-                'push_pos':    [float(v) for v in a['push_pos']],
-                'push_z':      float(a['push_z']),
-            }
+            {'action_type': a['action_type'], 'obj_idx': int(a['obj_idx']),
+             'push_pos': [float(v) for v in a['push_pos']], 'push_z': float(a['push_z'])}
             for a in plan
         ],
         'steps': _simulate_plan_steps(env, plan, initial_state),
@@ -224,57 +155,39 @@ def save_solution(path: str, plan: list[dict], initial_state: dict, args, env):
     print(f'Solution saved to {path}')
 
 
-def _do_replay(args):
+
+
+def _do_replay(cfg: DictConfig):
     """Load plan from file and replay with viewer. Called in a fresh process."""
-    with open(args._replay_file) as f:
+    with open(cfg.replay_file) as f:
         data = json.load(f)
 
-    plan = [
-        {**a, 'push_pos': np.array(a['push_pos'])}
-        for a in data['plan']
-    ]
+    plan = [{**a, 'push_pos': torch.tensor(a['push_pos'])} for a in data['plan']]
     initial_state = {
-        'target_pos':    np.array(data['initial_state']['target_pos']),
-        'target_quat':   np.array(data['initial_state']['target_quat']),
-        'obstacle_pos':  np.array(data['initial_state']['obstacle_pos']),
-        'obstacle_quat': np.array(data['initial_state']['obstacle_quat']),
+        'target_pos':    torch.tensor(data['initial_state']['target_pos']),
+        'target_quat':   torch.tensor(data['initial_state']['target_quat']),
+        'obstacle_pos':  torch.tensor(data['initial_state']['obstacle_pos']),
+        'obstacle_quat': torch.tensor(data['initial_state']['obstacle_quat']),
     }
 
-    from env import BinEnv
-    env = BinEnv(
-        n_obstacles=args.n_obstacles,
-        show_viewer=True,
-        seed=args.seed,
-        stackable=args.stackable,
-        friction=args.friction,
-        n_z_levels=args.n_z_levels,
-        push_steps=args.push_steps,
-        substeps=args.substeps,
-    )
-
-    # Restore the exact initial state the planner used
+    env = build_env(cfg, n_envs=1, show_viewer=True)
     env.set_state(initial_state)
     if env.show_viewer:
         input('Press Enter to start replay...')
 
     done = False
     for step_i, action in enumerate(plan):
-        print(f'  Step {step_i+1}/{len(plan)}: '
-              f'[{action["action_type"]}] obj {action["obj_idx"]} '
-              f'pos {np.round(action["push_pos"], 3)} z={action["push_z"]:.3f}')
         atype = action['action_type']
+        print(f'  Step {step_i+1}/{len(plan)}: [{atype}] obj {action["obj_idx"]} '
+              f'pos {torch.round(action["push_pos"], decimals=3)} z={action["push_z"]:.3f}')
         if atype == 'push_n':
-            _, reward, done = env.execute_ns_push(
-                action['push_pos'], action['push_z'], step_delay=0.02)
+            _, reward, done = env.execute_ns_push(action['push_pos'], action['push_z'])
         elif atype == 'pull_s':
-            _, reward, done = env.execute_ns_pull(
-                action['push_pos'], action['push_z'], step_delay=0.02)
+            _, reward, done = env.execute_ns_pull(action['push_pos'], action['push_z'])
         elif atype == 'push_e':
-            _, reward, done = env.execute_ew_push(
-                action['push_pos'], action['push_z'], direction=+1, step_delay=0.02)
+            _, reward, done = env.execute_ew_push(action['push_pos'], action['push_z'], direction=+1)
         else:
-            _, reward, done = env.execute_ew_push(
-                action['push_pos'], action['push_z'], direction=-1, step_delay=0.02)
+            _, reward, done = env.execute_ew_push(action['push_pos'], action['push_z'], direction=-1)
         print(f'    -> reward={reward:.3f}, done={done}')
         if done:
             print('  Target escaped the bin!')
@@ -286,13 +199,12 @@ def _do_replay(args):
         input('Press Enter to close viewer...')
 
 
-def _launch_replay(plan, initial_state, args):
+def _launch_replay(plan, initial_state, cfg: DictConfig):
     """Serialize plan+state to a temp file, relaunch this script for replay."""
     data = {
         'plan': [
             {**a, 'push_pos': [float(v) for v in a['push_pos']],
-                  'push_z': float(a['push_z']),
-                  'obj_idx': int(a['obj_idx'])}
+             'push_z': float(a['push_z']), 'obj_idx': int(a['obj_idx'])}
             for a in plan
         ],
         'initial_state': {
@@ -308,17 +220,27 @@ def _launch_replay(plan, initial_state, args):
 
     cmd = [
         sys.executable, __file__,
-        '--_replay-file', path,
-        '--n-obstacles',  str(args.n_obstacles),
-        '--friction',     str(args.friction),
-        '--n-z-levels',   str(args.n_z_levels),
-        '--push-steps',   str(args.push_steps),
-        '--substeps',     str(args.substeps),
+        f'replay_file={path}',
+        f'simulator={cfg.simulator.name}',
+        f'n_obstacles={cfg.n_obstacles}',
+        f'friction={cfg.friction}',
+        f'n_z_levels={cfg.n_z_levels}',
+        f'push_steps={cfg.push_steps}',
+        f'substeps={cfg.substeps}',
+        f'wall_thickness={cfg.wall_thickness}',
+        f'reward.target_progress.enabled={cfg.reward.target_progress.enabled}',
+        f'reward.obstacle_penalty.enabled={cfg.reward.obstacle_penalty.enabled}',
+        f'reward.obstacle_penalty.weight={cfg.reward.obstacle_penalty.weight}',
+        f'reward.path_blocker.enabled={cfg.reward.path_blocker.enabled}',
+        f'reward.path_blocker.weight={cfg.reward.path_blocker.weight}',
+        f'reward.path_blocker.scale={cfg.reward.path_blocker.scale}',
+        'hydra.run.dir=.',
+        'hydra.output_subdir=null',
     ]
-    if args.seed is not None:
-        cmd += ['--seed', str(args.seed)]
-    if args.stackable:
-        cmd += ['--stackable']
+    if cfg.seed is not None:
+        cmd.append(f'seed={cfg.seed}')
+    if cfg.stackable:
+        cmd.append('stackable=true')
 
     print(f'\nLaunching replay subprocess (plan saved to {path})...')
     subprocess.run(cmd)
@@ -329,118 +251,63 @@ def _launch_replay(plan, initial_state, args):
 # Main
 # ---------------------------------------------------------------------------
 
-def main():
-    args = parse_args()
-
+@hydra.main(version_base=None, config_path="conf", config_name="config")
+def main(cfg: DictConfig) -> None:
     # Replay mode: invoked by _launch_replay() in a clean process
-    if args._replay_file:
-        _do_replay(args)
+    if cfg.replay_file is not None:
+        _do_replay(cfg)
         return
 
-    from env import BinEnv
     from planner import RRTPusher, MCTSPusher
 
-    using_parallel = args.parallel_envs > 0
+    sim_name = cfg.simulator.name
 
-    # In parallel mode always run headless — replay launches a fresh process
-    show_viewer = (not using_parallel and
-                   (args.show_during_planning or args.visualize_search
-                    or args.pause_search or not args.no_replay))
+    # For isaaclab, viewer is toggled per-step; other simulators need it open upfront
+    if sim_name == 'isaaclab':
+        show_viewer = cfg.show_during_planning
+    else:
+        show_viewer = cfg.show_viewer or cfg.show_during_planning or cfg.visualize_search or cfg.pause_search
 
-    print(f'Building environment: {args.n_obstacles} obstacle(s), seed={args.seed}')
-    env = BinEnv(
-        n_obstacles=args.n_obstacles,
-        show_viewer=show_viewer,
-        seed=args.seed,
-        stackable=args.stackable,
-        friction=args.friction,
-        n_z_levels=args.n_z_levels,
-        push_steps=args.push_steps,
-        substeps=args.substeps,
-    )
-    initial_state = env.get_state()
-    print(f'Target start: {np.round(initial_state["target_pos"], 3)}')
+    print(f'Building environment ({sim_name}): {cfg.n_obstacles} obstacle(s), '
+          f'wall_thickness={cfg.wall_thickness}, seed={cfg.seed}')
+    env = build_env(cfg, n_envs=cfg.parallel_envs, show_viewer=show_viewer)
+    initial_state = env.get_state(0)
+
+    print(f'Target start: {torch.round(initial_state["target_pos"].cpu(), decimals=3)}')
 
     # ---- run planner ----
     t0 = time.time()
 
-    if args.planner == 'mcts':
-        if using_parallel:
-            from parallel_env import ParallelBinEnv
-            from planner import ParallelMCTSPusher
-            print(f'\nBuilding ParallelBinEnv ({args.parallel_envs} envs)...')
-            penv = ParallelBinEnv(
-                n_envs=args.parallel_envs,
-                n_obstacles=args.n_obstacles,
-                friction=args.friction,
-                n_z_levels=args.n_z_levels,
-                push_steps=args.push_steps,
-                substeps=args.substeps,
-            )
-            print(f'Running Parallel MCTS ({args.n_simulations} sims, '
-                  f'{args.parallel_envs} envs)...')
-            planner = ParallelMCTSPusher(
-                env=env,
-                parallel_env=penv,
-                n_simulations=args.n_simulations,
-                rollout_depth=4,
-                max_depth=10,
-                n_children=args.parallel_envs,
-                n_rollouts=args.parallel_envs,
-                seed=args.seed,
-            )
-        else:
-            print(f'\nRunning MCTS ({args.n_simulations} simulations)...')
-            planner = MCTSPusher(
-                env=env,
-                n_simulations=args.n_simulations,
-                rollout_depth=4,
-                max_depth=10,
-                n_children=4,
-                seed=args.seed,
-            )
+    if cfg.planner.name == 'mcts':
+        print(f'\nRunning MCTS ({cfg.planner.n_simulations} simulations)...')
+        planner = MCTSPusher(
+            env=env,
+            n_simulations=cfg.planner.n_simulations,
+            rollout_depth=cfg.planner.rollout_depth,
+            max_depth=cfg.planner.max_depth,
+            seed=cfg.seed,
+            verify_threshold=cfg.verify_threshold,
+        )
         plan = planner.plan(initial_state, verbose=True)
 
     else:  # rrt
-        if using_parallel:
-            from parallel_env import ParallelBinEnv
-            from planner import ParallelRRTPusher
-            print(f'\nBuilding ParallelBinEnv ({args.parallel_envs} envs)...')
-            penv = ParallelBinEnv(
-                n_envs=args.parallel_envs,
-                n_obstacles=args.n_obstacles,
-                friction=args.friction,
-                n_z_levels=args.n_z_levels,
-                push_steps=args.push_steps,
-                substeps=args.substeps,
-            )
-            print(f'Running Parallel RRT ({args.max_iter} batch iters × '
-                  f'{args.parallel_envs} envs = '
-                  f'~{args.max_iter * args.parallel_envs} evals)...')
-            planner = ParallelRRTPusher(
-                env=env,
-                parallel_env=penv,
-                max_iter=args.max_iter,
-                max_depth=12,
-                seed=args.seed,
-            )
-        else:
-            print(f'\nRunning RRT ({args.max_iter} iterations)...')
-            planner = RRTPusher(
-                env=env,
-                max_iter=args.max_iter,
-                max_depth=12,
-                seed=args.seed,
-            )
+        print(f'\nRunning RRT ({cfg.planner.max_iter} iterations)...')
+        planner = RRTPusher(
+            env=env,
+            max_iter=cfg.planner.max_iter,
+            max_depth=cfg.planner.max_depth,
+            seed=cfg.seed,
+            verify_threshold=cfg.verify_threshold,
+        )
         plan = planner.plan(initial_state, verbose=True,
-                            visualize_search=args.visualize_search,
-                            pause_each_iter=args.pause_search)
+                            visualize_search=cfg.visualize_search,
+                            pause_each_iter=cfg.pause_search)
 
     print(f'\nPlanning took {time.time() - t0:.1f}s')
 
-    if args.visualize:
+    if cfg.visualize:
         import viz
-        viz.plot_rrt_tree(planner) if args.planner == 'rrt' else viz.plot_mcts_tree(planner)
+        viz.plot_rrt_tree(planner) if cfg.planner.name == 'rrt' else viz.plot_mcts_tree(planner)
         viz.show()
 
     if not plan:
@@ -450,36 +317,19 @@ def main():
     print(f'Plan found: {len(plan)} actions')
     for i, a in enumerate(plan):
         print(f'  {i+1}. [{a["action_type"]}] obj={a["obj_idx"]} '
-              f'pos={np.round(a["push_pos"], 3)} z={a["push_z"]:.3f}')
+              f'pos={torch.round(a["push_pos"], decimals=3)} z={a["push_z"]:.3f}')
 
-    if args.save:
-        save_solution(args.save, plan, initial_state, args, env)
+    if cfg.save:
+        save_solution(cfg.save, plan, initial_state, cfg, env)
 
     # ---- replay ----
-    if not args.no_replay:
-        if using_parallel:
-            # Fresh subprocess = clean Genesis context, no scene conflicts
-            _launch_replay(plan, initial_state, args)
+    if not cfg.no_replay:
+        if sim_name == 'isaaclab':
+            env.replay(plan, initial_state)
         else:
-            # Single-env mode: reuse the existing env
-            env.reset()
-            if env.show_viewer:
-                input('Press Enter to start replay...')
-            for step_i, action in enumerate(plan):
-                atype = action['action_type']
-                print(f'  Step {step_i+1}: [{atype}]')
-                if atype == 'push_n':
-                    env.execute_ns_push(action['push_pos'], action['push_z'], step_delay=0.00)
-                elif atype == 'pull_s':
-                    env.execute_ns_pull(action['push_pos'], action['push_z'], step_delay=0.00)
-                elif atype == 'push_e':
-                    env.execute_ew_push(action['push_pos'], action['push_z'],
-                                        direction=+1, step_delay=0.00)
-                else:
-                    env.execute_ew_push(action['push_pos'], action['push_z'],
-                                        direction=-1, step_delay=0.00)
-            if env.show_viewer:
-                input('Press Enter to close viewer...')
+            # Genesis/IsaacGym: relaunch in a clean subprocess so the simulator
+            # can reinitialize its context with the viewer open.
+            _launch_replay(plan, initial_state, cfg)
 
 
 if __name__ == '__main__':

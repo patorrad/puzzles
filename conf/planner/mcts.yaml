@@ -1,0 +1,4 @@
+name: mcts
+n_simulations: 2000
+rollout_depth: 5
+max_depth: 10

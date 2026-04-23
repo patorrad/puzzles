@@ -1,0 +1,14 @@
+# Reward function components.
+# Set enabled: false to disable a term entirely.
+
+target_progress:
+  enabled: true   # progress of target toward exit: (BIN_D/2 - y) / (BIN_D/2 - EXIT_Y)
+
+obstacle_penalty:
+  enabled: true   # penalise each obstacle that leaves the bin
+  weight: 0.5
+
+path_blocker:
+  enabled: true   # penalise obstacles inside the bin that are south of the target (blocking exit path)
+  weight: 0.5
+  scale: 0.16     # x-falloff radius in metres (~2 × OBJ_SIZE); obstacle at x_dist >= scale gets zero penalty

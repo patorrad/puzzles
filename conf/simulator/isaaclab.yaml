@@ -1,0 +1,2 @@
+name: isaaclab
+force_threshold: 100.0  # N; stop pusher motion early if contact force exceeds this (0 to disable)
