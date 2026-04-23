@@ -22,6 +22,9 @@ value_net.pt
 /tmp/
 *.ckpt
 
+# Benchmark outputs
+benchmark_videos/
+
 # Logs
 *.log
 wandb/
