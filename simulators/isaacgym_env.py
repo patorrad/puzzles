@@ -87,7 +87,8 @@ class BinEnvIsaacGym(SimulatorEnv):
                  wall_thickness: float = WALL_T,
                  difficult_spawn: bool = False,
                  reward_cfg=None,
-                 bin_size: float | None = None):
+                 bin_size: float | None = None,
+                 bin_size_factor: float = 0.9):
         if not ISAACGYM_AVAILABLE:
             raise ImportError("isaacgym is not installed. Install it before using BinEnvIsaacGym.")
 
@@ -97,7 +98,7 @@ class BinEnvIsaacGym(SimulatorEnv):
                          n_z_levels=n_z_levels, push_steps=push_steps,
                          substeps=substeps, wall_thickness=wall_thickness,
                          difficult_spawn=difficult_spawn, reward_cfg=reward_cfg,
-                         bin_size=bin_size)
+                         bin_size=bin_size, bin_size_factor=bin_size_factor)
 
         _park_y = -(max(self.bin_w, self.bin_d) * 1.5 + 0.1)
         self._park = [self.bin_w / 2, _park_y, OBJ_H]

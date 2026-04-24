@@ -81,6 +81,7 @@ class BinEnv(SimulatorEnv):
                  difficult_spawn: bool = False,
                  reward_cfg=None,
                  bin_size: float | None = None,
+                 bin_size_factor: float = 0.9,
                  debug: bool = False):
         # Initialize Genesis once per process
         try:
@@ -94,7 +95,8 @@ class BinEnv(SimulatorEnv):
                          dt=dt, seed=seed, stackable=stackable, friction=friction,
                          n_z_levels=n_z_levels, push_steps=push_steps, substeps=substeps,
                          wall_thickness=wall_thickness, difficult_spawn=difficult_spawn,
-                         reward_cfg=reward_cfg, bin_size=bin_size, debug=debug)
+                         reward_cfg=reward_cfg, bin_size=bin_size,
+                         bin_size_factor=bin_size_factor, debug=debug)
 
         self._park = [-0.3, self.bin_d / 2, OBJ_H]
         self.z_levels = [OBJ_H + i * OBJ_SIZE for i in range(n_z_levels)]

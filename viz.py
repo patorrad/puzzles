@@ -56,24 +56,70 @@ def _draw_bin(ax: plt.Axes):
                label=f'exit (y={EXIT_Y})')
 
 
+def _col_counts(state: dict) -> dict:
+    """Return {obj_key: column_stack_count} for every object in state.
+
+    Objects within OBJ_SIZE/2 of each other in (x,y) are considered the same
+    column. Keys are ('target',) or ('obs', i).
+    """
+    _OBJ_H = OBJ_SIZE / 2
+    entries = [('target', state['target_pos'])]
+    for i, pos in enumerate(state['obstacle_pos']):
+        entries.append((('obs', i), pos))
+
+    columns: list[tuple[float, float, list]] = []  # (cx, cy, [keys])
+    for key, pos in entries:
+        x, y = float(pos[0]), float(pos[1])
+        matched = None
+        for col in columns:
+            if ((x - col[0]) ** 2 + (y - col[1]) ** 2) ** 0.5 < OBJ_SIZE * 0.6:
+                matched = col
+                break
+        if matched is None:
+            matched = (x, y, [])
+            columns.append(matched)
+        matched[2].append(key)
+
+    result = {}
+    for _, _, keys in columns:
+        for k in keys:
+            result[k] = len(keys)
+    return result
+
+
 def _draw_objects(ax: plt.Axes, state: dict):
-    """Target (red) and obstacles (blue) as labeled squares."""
+    """Target (red) and obstacles (blue) as labeled squares.
+
+    For stacked columns the square count is shown in the top-right corner of
+    each object's square. Objects with a higher z are drawn on top.
+    """
+    _OBJ_H = OBJ_SIZE / 2
+    counts = _col_counts(state)
+
+    def _z_level(pos) -> int:
+        return round((float(pos[2]) - _OBJ_H) / OBJ_SIZE)
+
+    def _draw_obj(x, y, z_lvl, color, alpha, label, count):
+        zo = 4 + z_lvl
+        ax.add_patch(mpatches.Rectangle(
+            (x - _HALF, y - _HALF), OBJ_SIZE, OBJ_SIZE,
+            color=color, alpha=alpha, zorder=zo,
+        ))
+        ax.text(x, y, label, ha='center', va='center',
+                fontsize=7, color='white', fontweight='bold', zorder=zo + 1)
+        if count > 1:
+            ax.text(x + _HALF * 0.75, y + _HALF * 0.75, str(count),
+                    ha='center', va='center', fontsize=6,
+                    color='white', fontweight='bold', zorder=zo + 1)
+
     tx, ty = state['target_pos'][:2]
-    ax.add_patch(mpatches.Rectangle(
-        (tx - _HALF, ty - _HALF), OBJ_SIZE, OBJ_SIZE,
-        color='crimson', alpha=0.85, zorder=4,
-    ))
-    ax.text(tx, ty, 'T', ha='center', va='center',
-            fontsize=7, color='white', fontweight='bold', zorder=5)
+    _draw_obj(tx, ty, _z_level(state['target_pos']),
+              'crimson', 0.85, 'T', counts['target'])
 
     for i, pos in enumerate(state['obstacle_pos']):
         ox, oy = pos[:2]
-        ax.add_patch(mpatches.Rectangle(
-            (ox - _HALF, oy - _HALF), OBJ_SIZE, OBJ_SIZE,
-            color='royalblue', alpha=0.75, zorder=4,
-        ))
-        ax.text(ox, oy, str(i), ha='center', va='center',
-                fontsize=7, color='white', zorder=5)
+        _draw_obj(ox, oy, _z_level(pos),
+                  'royalblue', 0.75, str(i), counts[('obs', i)])
 
 
 def _path_nodes_rrt(best_node) -> list:

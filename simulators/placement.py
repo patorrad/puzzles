@@ -21,6 +21,8 @@ def _place_objects_once(
     difficult_spawn: bool,
     bin_w: float,
     bin_d: float,
+    n_z_levels: int = 1,
+    target_z_level: int | None = None,
 ) -> dict:
     """Single placement attempt. Caller is responsible for seeding."""
     margin   = OBJ_SIZE * 0.7
@@ -30,25 +32,60 @@ def _place_objects_once(
     columns:   list[tuple[float, float, int]] = []
     positions: list[list[float]] = []
 
+    # Resolve None → random level after obstacles are placed (done inside the loop).
+    _target_z = target_z_level  # None means randomise when target turn arrives
+
     n_objects = n_obstacles + 1  # obstacles first, target last
     for obj_i in range(n_objects):
         is_target = (obj_i == n_obstacles)
+        if is_target and _target_z is None:
+            # Pick randomly from levels that have eligible columns, falling back to 0.
+            eligible_levels = sorted({c[2] for c in columns if c[2] < n_z_levels})
+            if eligible_levels and n_z_levels > 1:
+                _target_z = int(eligible_levels[int(torch.randint(len(eligible_levels), (1,)).item())])
+            else:
+                _target_z = 0
         obj_y_lo  = bin_d / 2 if (is_target and difficult_spawn) else y_lo
 
         placed = False
 
-        if stackable and columns and torch.rand(1).item() < 0.5:
-            idx = int(torch.randint(len(columns), (1,)).item())
-            x, y, count = columns[idx]
-            positions.append([x, y, OBJ_H + OBJ_SIZE * count])
-            columns[idx] = (x, y, count + 1)
-            placed = True
+        if is_target and _target_z > 0:
+            # Find a column that already has exactly target_z_level objects so
+            # the target sits at that height with full support beneath it.
+            eligible = [(i, c) for i, c in enumerate(columns) if c[2] == _target_z]
+            if eligible:
+                idx = int(torch.randint(len(eligible), (1,)).item())
+                choice_i, (x, y, count) = eligible[idx]
+                positions.append([x, y, OBJ_H + OBJ_SIZE * count])
+                columns[choice_i] = (x, y, count + 1)
+                placed = True
+            # Fall through to floor placement if no suitable column exists.
 
         if not placed:
+            sep = OBJ_SIZE * 1.05  # minimum column separation
+            can_stack = (stackable or n_z_levels > 1) and not is_target
             for _ in range(500):
                 x = torch.empty(1).uniform_(x_lo, x_hi).item()
                 y = torch.empty(1).uniform_(obj_y_lo, y_hi).item()
-                if all(((x - cx) ** 2 + (y - cy) ** 2) ** 0.5 > OBJ_SIZE * 1.05
+
+                if can_stack and columns:
+                    # If the sample lands within the rejection radius of a column,
+                    # stack on the closest eligible one instead of retrying.
+                    nearby = [
+                        (i, c) for i, c in enumerate(columns)
+                        if ((x - c[0]) ** 2 + (y - c[1]) ** 2) ** 0.5 < sep
+                        and c[2] < n_z_levels
+                    ]
+                    if nearby:
+                        choice_i, (cx, cy, count) = min(
+                            nearby, key=lambda ic: (x - ic[1][0]) ** 2 + (y - ic[1][1]) ** 2
+                        )
+                        positions.append([cx, cy, OBJ_H + OBJ_SIZE * count])
+                        columns[choice_i] = (cx, cy, count + 1)
+                        placed = True
+                        break
+
+                if all(((x - cx) ** 2 + (y - cy) ** 2) ** 0.5 > sep
                        for cx, cy, _ in columns):
                     positions.append([x, y, OBJ_H])
                     columns.append((x, y, 1))
@@ -60,10 +97,13 @@ def _place_objects_once(
                 columns.append((bin_w / 2, bin_d / 2, 1))
 
     identity = [1.0, 0.0, 0.0, 0.0]
+    # Sort obstacles by ascending z so lower objects are placed first in
+    # sequential simulators (e.g. IsaacLab), ensuring support before stacking.
+    obstacle_positions = sorted(positions[:n_obstacles], key=lambda p: p[2])
     return {
         'target_pos':    torch.tensor(positions[n_obstacles], dtype=torch.float32),
         'target_quat':   torch.tensor(identity,               dtype=torch.float32),
-        'obstacle_pos':  (torch.tensor(positions[:n_obstacles], dtype=torch.float32)
+        'obstacle_pos':  (torch.tensor(obstacle_positions, dtype=torch.float32)
                           if n_obstacles > 0 else torch.zeros(0, 3, dtype=torch.float32)),
         'obstacle_quat': (torch.tensor([identity] * n_obstacles, dtype=torch.float32)
                           if n_obstacles > 0 else torch.zeros(0, 4, dtype=torch.float32)),
@@ -93,6 +133,8 @@ def random_initial_state(
     bin_d: Optional[float] = None,
     max_attempts: int = 200,
     debug: bool = False,
+    n_z_levels: int = 1,
+    target_z_level: Optional[int] = None,
 ) -> dict:
     """
     Generate a random non-overlapping initial state dict (pure PyTorch, no simulator).
@@ -136,7 +178,8 @@ def random_initial_state(
     attempts = max_attempts if difficult_spawn else 1
     state = None
     for attempt in range(attempts):
-        state = _place_objects_once(n_obstacles, stackable, difficult_spawn, bin_w, bin_d)
+        state = _place_objects_once(n_obstacles, stackable, difficult_spawn, bin_w, bin_d, n_z_levels,
+                                    target_z_level=target_z_level)
         if not difficult_spawn:
             return state
         pb = _path_blocker_value(state, n_obstacles)

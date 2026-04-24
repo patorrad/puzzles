@@ -120,8 +120,10 @@ class BinEnvIsaacLab(SimulatorEnv):
                  difficult_spawn: bool = False,
                  reward_cfg=None,
                  bin_size: float | None = None,
+                 bin_size_factor: float = 0.9,
                  force_threshold: float = 100.0,
-                 debug: bool = False):
+                 debug: bool = False,
+                 target_z_level: int | None = None):
         if not ISAACLAB_AVAILABLE:
             raise ImportError(
                 "isaaclab (or omni.isaac.lab) is not installed. "
@@ -135,7 +137,8 @@ class BinEnvIsaacLab(SimulatorEnv):
             n_z_levels=n_z_levels, push_steps=push_steps,
             substeps=substeps, wall_thickness=wall_thickness,
             difficult_spawn=difficult_spawn, reward_cfg=reward_cfg,
-            bin_size=bin_size, debug=debug,
+            bin_size=bin_size, bin_size_factor=bin_size_factor,
+            debug=debug, target_z_level=target_z_level,
         )
 
         self.force_threshold = force_threshold
@@ -466,6 +469,8 @@ class BinEnvIsaacLab(SimulatorEnv):
             bin_w=self.bin_w,
             bin_d=self.bin_d,
             debug=self.debug,
+            n_z_levels=self.n_z_levels,
+            target_z_level=self.target_z_level,
         )
 
         env_ids = torch.tensor([0], device=self.device, dtype=torch.long)

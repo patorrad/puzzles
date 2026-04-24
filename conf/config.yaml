@@ -6,12 +6,14 @@ defaults:
 
 # Environment
 n_obstacles: 2
-bin_size: null        # null = auto-scale with n_obstacles; set a float (e.g. 0.5) for a fixed size
+bin_size: null             # null = auto-scale with n_obstacles; set a float (e.g. 0.5) for a fixed size
+bin_size_factor: 0.9      # auto bin_size = (n_obstacles+1) * OBJ_SIZE * this factor (ignored if bin_size is set)
 stackable: false
 difficult_spawn: false
 debug: true
 friction: 1.0
 n_z_levels: 1
+target_z_level: null  # null = floor; integer forces the target to that z level (0=floor, 1=stacked, ...)
 push_steps: 512
 substeps: 4
 wall_thickness: 0.25

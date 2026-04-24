@@ -35,7 +35,9 @@ def build_env(cfg, n_envs: int, show_viewer: bool = False):
         n_envs=n_envs,
         reward_cfg=cfg.reward,
         bin_size=cfg.get('bin_size', None),
+        bin_size_factor=cfg.get('bin_size_factor', 0.9),
         debug=cfg.get('debug', False),
+        target_z_level=cfg.get('target_z_level', None),
     )
 
 

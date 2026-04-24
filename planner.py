@@ -343,6 +343,7 @@ class RRTPusher(_PlannerBase):
                     self.tree = tree
                     self.best_node = goal_node
                     return path
+                goal_node.dead_end = True  # prune so RRT doesn't revisit this failed path
                 goal_node = None
 
             if verbose and (i + 1) % 20 == 0:
@@ -532,7 +533,7 @@ class MCTSPusher(_PlannerBase):
                     best_reward = reward
                     best_leaf = node
                     pbar.set_postfix(best_reward=f'{best_reward:.3f}')
-                if node.done and goal_node is None:
+                if node.done and not node.dead_end and goal_node is None:
                     goal_node = node
 
             if goal_node is not None:
@@ -553,6 +554,7 @@ class MCTSPusher(_PlannerBase):
                     self.root = root
                     self.best_leaf = goal_node
                     return path
+                goal_node.dead_end = True  # prune so MCTS doesn't revisit this failed path
                 goal_node = None
 
             if verbose and (sim_i + 1) % 10 == 0:

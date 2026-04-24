@@ -47,7 +47,6 @@ class SimulatorEnv(ABC):
     """
 
     _OBJ_SIZE = 0.08   # object cube side length (shared across all backends)
-    _BIN_SIZE_FACTOR = 0.6  # auto bin_size = n_total * OBJ_SIZE * factor
 
     def __init__(self, n_obstacles: int = 2, n_envs: int = 1,
                  show_viewer: bool = False,
@@ -59,7 +58,9 @@ class SimulatorEnv(ABC):
                  difficult_spawn: bool = False,
                  reward_cfg=None,
                  bin_size: Optional[float] = None,
-                 debug: bool = False):
+                 bin_size_factor: float = 0.9,
+                 debug: bool = False,
+                 target_z_level: Optional[int] = None):
         self.n_obstacles = n_obstacles
         self.n_envs = n_envs
         self.show_viewer = show_viewer
@@ -67,6 +68,7 @@ class SimulatorEnv(ABC):
         self.dt = dt
         self.stackable = stackable
         self.n_z_levels = n_z_levels
+        self.target_z_level = target_z_level
         self.push_steps = push_steps
         self.substeps = substeps
         self.wall_thickness = wall_thickness
@@ -75,7 +77,7 @@ class SimulatorEnv(ABC):
         self.debug = debug
 
         if bin_size is None:
-            bin_size = (n_obstacles + 1) * self._OBJ_SIZE * self._BIN_SIZE_FACTOR
+            bin_size = (n_obstacles + 1) * self._OBJ_SIZE * bin_size_factor
         self.bin_w = bin_size
         self.bin_d = bin_size
 
