@@ -230,7 +230,7 @@ class BinEnvIsaacLab(SimulatorEnv):
         )
         self.sim = SimulationContext(sim_cfg)
         print(f"[IsaacLab] simulation device: {self.device}")
-        if self.show_viewer:
+        if not _headless:
             ox = self.env_origins[0, 0].item()
             oy = self.env_origins[0, 1].item()
             eye, target = self._camera_view(ox, oy)
@@ -239,6 +239,7 @@ class BinEnvIsaacLab(SimulatorEnv):
                 eye=np.array(eye),
                 target=np.array(target),
             )
+        if self.show_viewer:
             self._start_render_toggle_thread()
 
     # ------------------------------------------------------------------
