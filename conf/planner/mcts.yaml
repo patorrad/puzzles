@@ -1,4 +1,5 @@
 name: mcts
-n_simulations: 2000
+n_simulations: 200000
 rollout_depth: 5
 max_depth: 10
+target_prob: 0.1

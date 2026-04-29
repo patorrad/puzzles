@@ -28,10 +28,22 @@ application to be running.  Launch it before instantiating this class with:
 Quaternion convention: (w, x, y, z) — matches Genesis.
 """
 
+import colorsys
+import time
 import numpy as np
 import torch
 from typing import List, Optional
+from tqdm import tqdm
 from .base_env import SimulatorEnv
+
+
+def _obstacle_color(i: int, n: int) -> tuple:
+    """Blue-family color for obstacle i of n, spread from cyan-blue to indigo-blue."""
+    t = i / max(n - 1, 1)
+    hue = 0.55 + t * 0.17
+    sat = 0.65
+    val = 0.95 - t * 0.20
+    return colorsys.hsv_to_rgb(hue, sat, val)
 
 try:
     import os as _os
@@ -44,7 +56,8 @@ try:
 
     import isaaclab.sim as sim_utils
     from isaaclab.sim import SimulationContext, SimulationCfg, PhysxCfg
-    from isaaclab.assets import RigidObject, RigidObjectCfg
+    from isaaclab.assets import (RigidObject, RigidObjectCfg,
+                                 RigidObjectCollection, RigidObjectCollectionCfg)
     from isaaclab.sensors import ContactSensor, ContactSensorCfg
     ISAACLAB_AVAILABLE = True
 except ImportError:
@@ -52,7 +65,8 @@ except ImportError:
         # Older package name (Isaac Lab < 2.0)
         import omni.isaac.lab.sim as sim_utils
         from omni.isaac.lab.sim import SimulationContext, SimulationCfg
-        from omni.isaac.lab.assets import RigidObject, RigidObjectCfg
+        from omni.isaac.lab.assets import (RigidObject, RigidObjectCfg,
+                                           RigidObjectCollection, RigidObjectCollectionCfg)
         from omni.isaac.lab.sensors import ContactSensor, ContactSensorCfg
         ISAACLAB_AVAILABLE = True
     except ImportError:
@@ -62,6 +76,8 @@ except ImportError:
         SimulationCfg = None
         RigidObject = None
         RigidObjectCfg = None
+        RigidObjectCollection = None
+        RigidObjectCollectionCfg = None
         ContactSensor = None
         ContactSensorCfg = None
 
@@ -122,8 +138,11 @@ class BinEnvIsaacLab(SimulatorEnv):
                  bin_size: float | None = None,
                  bin_size_factor: float = 0.9,
                  force_threshold: float = 100.0,
+                 position_iterations: int = 4,
+                 velocity_iterations: int = 1,
                  debug: bool = False,
-                 target_z_level: int | None = None):
+                 target_z_level: int | None = None,
+                 force_obstacle_on_target: bool = False):
         if not ISAACLAB_AVAILABLE:
             raise ImportError(
                 "isaaclab (or omni.isaac.lab) is not installed. "
@@ -139,9 +158,16 @@ class BinEnvIsaacLab(SimulatorEnv):
             difficult_spawn=difficult_spawn, reward_cfg=reward_cfg,
             bin_size=bin_size, bin_size_factor=bin_size_factor,
             debug=debug, target_z_level=target_z_level,
+            force_obstacle_on_target=force_obstacle_on_target,
         )
 
         self.force_threshold = force_threshold
+        self.position_iterations = position_iterations
+        self.velocity_iterations = velocity_iterations
+        self._in_push: bool = False  # slims _step_sim to sensor-only refresh during push loop
+        self._active_push_sensors: list = []  # set before each push to only update needed sensors
+        self._dbg_t_sim: float = 0.0
+        self._dbg_t_sensors: float = 0.0
         self.force_trace: list[float] = []  # per-step force magnitudes for env 0, last batch_evaluate
         self._post_step_hook = None   # callable invoked after every _step_sim; used by record_replay
         self._force_render   = False  # when True, _step_sim always renders (used by replay)
@@ -161,6 +187,11 @@ class BinEnvIsaacLab(SimulatorEnv):
             col = ei % n_cols
             self.env_origins[ei, 0] = col * env_spacing
             self.env_origins[ei, 1] = row * env_spacing
+        # CPU-side origin cache so _local_to_world avoids GPU→CPU sync
+        self._env_origins_xy: list[tuple[float, float]] = [
+            ((ei % n_cols) * env_spacing, (ei // n_cols) * env_spacing)
+            for ei in range(self.n_envs)
+        ]
 
         # Checkpoint for single-mode reset (saved after _place_objects settles)
         self._initial_states: dict | None = None
@@ -192,12 +223,13 @@ class BinEnvIsaacLab(SimulatorEnv):
             device=self.device,
             physx=PhysxCfg(
                 enable_ccd=False,
-                min_position_iteration_count=16,
-                min_velocity_iteration_count=4,
+                min_position_iteration_count=self.position_iterations,
+                min_velocity_iteration_count=self.velocity_iterations,
                 enable_external_forces_every_iteration=True,
             ),
         )
         self.sim = SimulationContext(sim_cfg)
+        print(f"[IsaacLab] simulation device: {self.device}")
         if self.show_viewer:
             ox = self.env_origins[0, 0].item()
             oy = self.env_origins[0, 1].item()
@@ -291,10 +323,14 @@ class BinEnvIsaacLab(SimulatorEnv):
             (OBJ_SIZE, OBJ_SIZE, OBJ_SIZE),
             mass=0.05, kinematic=False, friction=fr, color=(0.9, 0.2, 0.2),
             pos_iters=8)
-        obs_cfg    = self._make_box_cfg(
-            (OBJ_SIZE, OBJ_SIZE, OBJ_SIZE),
-            mass=0.5, kinematic=False, friction=fr, color=(0.3, 0.5, 0.9),
-            pos_iters=8)
+        obs_cfgs = [
+            self._make_box_cfg(
+                (OBJ_SIZE, OBJ_SIZE, OBJ_SIZE),
+                mass=0.5, kinematic=False, friction=fr,
+                color=_obstacle_color(oi, self.n_obstacles),
+                pos_iters=8)
+            for oi in range(self.n_obstacles)
+        ]
 
         # Ground plane (one shared plane under all envs)
         sim_utils.GroundPlaneCfg().func("/World/GroundPlane", sim_utils.GroundPlaneCfg())
@@ -328,7 +364,7 @@ class BinEnvIsaacLab(SimulatorEnv):
             self._spawn_prim(f"{ep}/Target", target_cfg,
                              self._local_to_world([x0, bd / 2, OBJ_H], ei))
             for oi in range(self.n_obstacles):
-                self._spawn_prim(f"{ep}/Obstacle{oi}", obs_cfg,
+                self._spawn_prim(f"{ep}/Obstacle{oi}", obs_cfgs[oi],
                                  self._local_to_world([x0 + (oi + 1) * step,
                                                        bd / 2, OBJ_H], ei))
 
@@ -340,15 +376,48 @@ class BinEnvIsaacLab(SimulatorEnv):
         self.pusher_ns_obj = _ro("/World/envs/env_.*/PusherNS")
         self.pusher_ew_obj = _ro("/World/envs/env_.*/PusherEW")
         self.target_obj    = _ro("/World/envs/env_.*/Target")
-        self.obstacle_objs = [
-            _ro(f"/World/envs/env_.*/Obstacle{i}")
-            for i in range(self.n_obstacles)
-        ]
+        self.obstacle_collection = RigidObjectCollection(
+            RigidObjectCollectionCfg(rigid_objects={
+                f"obs{i}": RigidObjectCfg(
+                    prim_path=f"/World/envs/env_.*/Obstacle{i}", spawn=None
+                )
+                for i in range(self.n_obstacles)
+            })
+        )
 
         self.pusher_ns_sensor = ContactSensor(ContactSensorCfg(
             prim_path="/World/envs/env_.*/PusherNS", history_length=1))
         self.pusher_ew_sensor = ContactSensor(ContactSensorCfg(
             prim_path="/World/envs/env_.*/PusherEW", history_length=1))
+
+        # Pre-allocated single-row buffers for kinematic pusher updates.
+        # Used by _set_pose for n=1 calls outside the push loop (warm-up, park, _set_state).
+        self._pose_buf = {
+            self.pusher_ns_obj: torch.zeros(1, 7, device=self.device),
+            self.pusher_ew_obj: torch.zeros(1, 7, device=self.device),
+        }
+        self._vel_buf = {
+            self.pusher_ns_obj: torch.zeros(1, 6, device=self.device),
+            self.pusher_ew_obj: torch.zeros(1, 6, device=self.device),
+        }
+        _iq = torch.tensor(list(_IDENTITY_QUAT), device=self.device)
+        for buf in self._pose_buf.values():
+            buf[0, 3:] = _iq
+
+        # Batch-write buffers for the push loop. Instead of k separate
+        # write_root_pose_to_sim calls (each with fixed CUDA-sync overhead),
+        # we write all active envs in one call per pusher per step.
+        self._batch_pose_ns  = torch.zeros(self.n_envs, 7, device=self.device)
+        self._batch_pose_ew  = torch.zeros(self.n_envs, 7, device=self.device)
+        self._batch_vel_zero = torch.zeros(self.n_envs, 6, device=self.device)
+        self._batch_ids_ns   = torch.zeros(self.n_envs, dtype=torch.long, device=self.device)
+        self._batch_ids_ew   = torch.zeros(self.n_envs, dtype=torch.long, device=self.device)
+        self._batch_pose_ns[:, 3:] = _iq
+        self._batch_pose_ew[:, 3:] = _iq
+
+        # Pre-allocated single-row buffer for target pose writes in _set_state.
+        self._tgt_pose_buf = torch.zeros(1, 7, device=self.device)
+        self._tgt_vel_buf  = torch.zeros(1, 6, device=self.device)
 
     # ------------------------------------------------------------------
     # Coordinate helpers
@@ -367,8 +436,7 @@ class BinEnvIsaacLab(SimulatorEnv):
 
     def _local_to_world(self, pos_local: list, env_idx: int) -> tuple:
         """Convert a bin-local 3-D position to world coordinates."""
-        ox = self.env_origins[env_idx, 0].item()
-        oy = self.env_origins[env_idx, 1].item()
+        ox, oy = self._env_origins_xy[env_idx]
         return (pos_local[0] + ox, pos_local[1] + oy, pos_local[2])
 
     def _world_to_local(self, pos_world: torch.Tensor, env_idx: int) -> torch.Tensor:
@@ -383,11 +451,17 @@ class BinEnvIsaacLab(SimulatorEnv):
     def _refresh_all(self):
         """Pull fresh state from PhysX into every RigidObject's data cache."""
         dt = self.sim.get_physics_dt()
-        for obj in ([self.pusher_ns_obj, self.pusher_ew_obj, self.target_obj]
-                    + self.obstacle_objs):
+        for obj in [self.pusher_ns_obj, self.pusher_ew_obj, self.target_obj]:
             obj.update(dt)
+        self.obstacle_collection.update(dt)
         self.pusher_ns_sensor.update(dt)
         self.pusher_ew_sensor.update(dt)
+
+    def _refresh_sensors_only(self):
+        """Refresh only the force sensors that are active in the current push batch."""
+        dt = self.sim.get_physics_dt()
+        for sensor in self._active_push_sensors:
+            sensor.update(dt)
 
     def _start_render_toggle_thread(self):
         """Spawn a daemon thread that reads raw input from /dev/tty and toggles rendering on 'f'."""
@@ -415,8 +489,19 @@ class BinEnvIsaacLab(SimulatorEnv):
 
     def _step_sim(self, render: bool = False):
         """Advance one physics step (all envs simultaneously) and refresh."""
-        self.sim.step(render=(render or self._force_render) and self.rendering_enabled)
-        self._refresh_all()
+        if self.debug and self._in_push:
+            _t0 = time.perf_counter()
+            self.sim.step(render=(render or self._force_render) and self.rendering_enabled)
+            self._dbg_t_sim += time.perf_counter() - _t0
+            _t0 = time.perf_counter()
+            self._refresh_sensors_only()
+            self._dbg_t_sensors += time.perf_counter() - _t0
+        else:
+            self.sim.step(render=(render or self._force_render) and self.rendering_enabled)
+            if self._in_push:
+                self._refresh_sensors_only()
+            else:
+                self._refresh_all()
         if self._post_step_hook is not None:
             self._post_step_hook()
 
@@ -425,29 +510,43 @@ class BinEnvIsaacLab(SimulatorEnv):
     # ------------------------------------------------------------------
 
     def _set_pose(self, obj: RigidObject, pos_local: list,
-                  quat_wxyz: tuple, env_ids: torch.Tensor):
+                  quat_wxyz: tuple, env_ids: torch.Tensor,
+                  env_idx: int | None = None):
         """
         Teleport a RigidObject to a bin-local position in the given envs.
 
         pos_local is in bin-local frame; internally converted to world frame
         for each env before writing to the physics backend.
+        Pass env_idx when known to avoid env_ids[0].item() GPU→CPU sync.
         """
         n = len(env_ids)
-        pos_world = torch.zeros(n, 3, device=self.device)
-        for i, ei in enumerate(env_ids.tolist()):
-            wp = self._local_to_world(pos_local, int(ei))
-            pos_world[i] = torch.tensor(wp, device=self.device)
-        quat = (torch.tensor(list(quat_wxyz), device=self.device)
-                .unsqueeze(0).expand(n, -1))
-        pose = torch.cat([pos_world, quat], dim=-1)   # (n, 7)
-        obj.write_root_pose_to_sim(pose, env_ids=env_ids)
-        vel_zero = torch.zeros(n, 6, device=self.device)
-        obj.write_root_velocity_to_sim(vel_zero, env_ids=env_ids)
+        pose_buf = self._pose_buf.get(obj) if n == 1 else None
+        if pose_buf is not None:
+            # Fast path: reuse pre-allocated buffers (n=1, pusher hot loop)
+            # Quat is pre-filled with _IDENTITY_QUAT at build time — no write needed.
+            ei = env_idx if env_idx is not None else int(env_ids[0].item())
+            ox, oy = self._env_origins_xy[ei]
+            pose_buf[0, 0] = pos_local[0] + ox
+            pose_buf[0, 1] = pos_local[1] + oy
+            pose_buf[0, 2] = pos_local[2]
+            obj.write_root_pose_to_sim(pose_buf, env_ids=env_ids)
+            obj.write_root_velocity_to_sim(self._vel_buf[obj], env_ids=env_ids)
+        else:
+            pos_world = torch.zeros(n, 3, device=self.device)
+            for i, ei in enumerate(env_ids.tolist()):
+                wp = self._local_to_world(pos_local, int(ei))
+                pos_world[i] = torch.tensor(wp, device=self.device)
+            quat = (torch.tensor(list(quat_wxyz), device=self.device)
+                    .unsqueeze(0).expand(n, -1))
+            pose = torch.cat([pos_world, quat], dim=-1)
+            obj.write_root_pose_to_sim(pose, env_ids=env_ids)
+            vel_zero = torch.zeros(n, 6, device=self.device)
+            obj.write_root_velocity_to_sim(vel_zero, env_ids=env_ids)
 
-    def _park_pushers(self, env_ids: torch.Tensor):
+    def _park_pushers(self, env_ids: torch.Tensor, env_idx: int | None = None):
         """Park both pusher blades at the safe position for the given envs."""
-        self._set_pose(self.pusher_ns_obj, self._park, _IDENTITY_QUAT, env_ids)
-        self._set_pose(self.pusher_ew_obj, self._park, _IDENTITY_QUAT, env_ids)
+        self._set_pose(self.pusher_ns_obj, self._park, _IDENTITY_QUAT, env_ids, env_idx=env_idx)
+        self._set_pose(self.pusher_ew_obj, self._park, _IDENTITY_QUAT, env_ids, env_idx=env_idx)
 
     # ------------------------------------------------------------------
     # Object placement (single mode only)
@@ -471,14 +570,23 @@ class BinEnvIsaacLab(SimulatorEnv):
             debug=self.debug,
             n_z_levels=self.n_z_levels,
             target_z_level=self.target_z_level,
+            force_obstacle_on_target=self.force_obstacle_on_target,
         )
 
         env_ids = torch.tensor([0], device=self.device, dtype=torch.long)
 
         # Place obstacles first, then target; settle after each so PhysX
         # commits each teleport before the next object is inserted.
-        for i, obj in enumerate(self.obstacle_objs):
-            self._set_pose(obj, state['obstacle_pos'][i].tolist(), _IDENTITY_QUAT, env_ids)
+        for i in range(self.n_obstacles):
+            pos_w  = torch.tensor(self._local_to_world(state['obstacle_pos'][i].tolist(), 0),
+                                  device=self.device).unsqueeze(0)
+            quat_t = torch.tensor(list(_IDENTITY_QUAT), device=self.device).unsqueeze(0)
+            vel_t  = torch.zeros(1, 6, device=self.device)
+            obs_state = torch.cat([pos_w, quat_t, vel_t], dim=-1).unsqueeze(0)
+            self.obstacle_collection.write_object_state_to_sim(
+                obs_state, env_ids=env_ids,
+                object_ids=torch.tensor([i], device=self.device),
+            )
             for _ in range(10):
                 self._step_sim(render=self.show_viewer)
 
@@ -512,29 +620,35 @@ class BinEnvIsaacLab(SimulatorEnv):
         return {
             'target_pos':    _pos(self.target_obj),
             'target_quat':   _quat(self.target_obj),
-            'obstacle_pos':  torch.stack([_pos(o) for o in self.obstacle_objs]),
-            'obstacle_quat': torch.stack([_quat(o) for o in self.obstacle_objs]),
+            'obstacle_pos':  (self.obstacle_collection.data.object_link_pose_w[env_idx, :, :3].clone()
+                              - self.env_origins[env_idx].to(self.device)),
+            'obstacle_quat': self.obstacle_collection.data.object_link_pose_w[env_idx, :, 3:].clone(),
         }
 
-    def _set_state(self, state: dict, env_idx: int | None = None):
+    def _set_state(self, state: dict, env_idx: int | None = None,
+                   env_ids: torch.Tensor | None = None):
         """Teleport all objects to the given state, park pushers, zero velocities."""
         if env_idx is None:
             env_idx = 0
-        env_ids = torch.tensor([env_idx], device=self.device, dtype=torch.long)
+        if env_ids is None:
+            env_ids = torch.tensor([env_idx], device=self.device, dtype=torch.long)
 
-        def _lst(t) -> list:
-            return t.tolist() if torch.is_tensor(t) else list(t)
-
-        self._set_pose(self.target_obj,
-                       _lst(state['target_pos']),
-                       tuple(_lst(state['target_quat'])),
-                       env_ids)
-        for i, obs in enumerate(self.obstacle_objs):
-            self._set_pose(obs,
-                           _lst(state['obstacle_pos'][i]),
-                           tuple(_lst(state['obstacle_quat'][i])),
-                           env_ids)
-        self._park_pushers(env_ids)
+        ox, oy = self._env_origins_xy[env_idx]
+        tgt_pos  = state['target_pos'].to(self.device)
+        tgt_quat = state['target_quat'].to(self.device)
+        self._tgt_pose_buf[0, 0] = tgt_pos[0] + ox
+        self._tgt_pose_buf[0, 1] = tgt_pos[1] + oy
+        self._tgt_pose_buf[0, 2] = tgt_pos[2]
+        self._tgt_pose_buf[0, 3:] = tgt_quat
+        self.target_obj.write_root_pose_to_sim(self._tgt_pose_buf, env_ids=env_ids)
+        self.target_obj.write_root_velocity_to_sim(self._tgt_vel_buf, env_ids=env_ids)
+        origin = torch.tensor([ox, oy, 0.0], device=self.device)
+        obs_pos_w = state['obstacle_pos'].to(self.device) + origin
+        obs_quat  = state['obstacle_quat'].to(self.device)
+        obs_vel   = torch.zeros(self.n_obstacles, 6, device=self.device)
+        obs_state = torch.cat([obs_pos_w, obs_quat, obs_vel], dim=-1).unsqueeze(0)
+        self.obstacle_collection.write_object_state_to_sim(obs_state, env_ids=env_ids)
+        self._park_pushers(env_ids, env_idx=env_idx)
 
     def get_state(self, env_idx: int = 0) -> dict:
         """Public interface: get state from the given env slot."""
@@ -671,15 +785,13 @@ class BinEnvIsaacLab(SimulatorEnv):
             return results
 
         # 1. Teleport each env to its starting state; compute stroke geometry
-        strokes: list[tuple[str, list, list]] = []
-        for env_idx, (state, action) in enumerate(pairs):
-            self._set_state(state, env_idx)
-            ptype, start, end = self._action_to_stroke(action)
-            strokes.append((ptype, start, end))
-
-        # Pre-allocate env_ids tensors to avoid GPU memory churn in loops
         env_ids_list = [torch.tensor([i], device=self.device, dtype=torch.long)
                         for i in range(k)]
+        strokes: list[tuple[str, list, list]] = []
+        for env_idx, (state, action) in enumerate(pairs):
+            self._set_state(state, env_idx, env_ids=env_ids_list[env_idx])
+            ptype, start, end = self._action_to_stroke(action)
+            strokes.append((ptype, start, end))
 
         # Settle after teleporting objects (let solver resolve initial contacts)
         self._step_sim(render=False)
@@ -688,43 +800,128 @@ class BinEnvIsaacLab(SimulatorEnv):
         # 2. Warm-up: place pushers at stroke start, settle 2 ticks
         for env_idx, (ptype, start, _) in enumerate(strokes):
             obj = self.pusher_ns_obj if ptype == 'ns' else self.pusher_ew_obj
-            self._set_pose(obj, start, _IDENTITY_QUAT, env_ids_list[env_idx])
+            self._set_pose(obj, start, _IDENTITY_QUAT, env_ids_list[env_idx], env_idx=env_idx)
         self._step_sim(render=self.show_viewer)
         self._step_sim(render=self.show_viewer)
 
         # 3. Sweep — one sim.step() advances ALL envs simultaneously
-        force_stopped = [False] * k
-        self.force_trace = []
+
+        _force_buf: list[torch.Tensor] = []
         ptype0, _, _ = strokes[0]
         sensor0 = self.pusher_ns_sensor if ptype0 == 'ns' else self.pusher_ew_sensor
-        for step_i in range(self.push_steps):
-            t = (step_i + 1) / self.push_steps
-            for env_idx, (ptype, start, end) in enumerate(strokes):
-                if force_stopped[env_idx]:
-                    continue
-                pos = [s + t * (e - s) for s, e in zip(start, end)]
-                obj = self.pusher_ns_obj if ptype == 'ns' else self.pusher_ew_obj
-                self._set_pose(obj, pos, _IDENTITY_QUAT, env_ids_list[env_idx])
-            self._step_sim(render=self.show_viewer)
+        ptypes_used = {ptype for ptype, _, _ in strokes}
+        self._active_push_sensors = (
+            [self.pusher_ns_sensor] * ('ns' in ptypes_used) +
+            [self.pusher_ew_sensor] * ('ew' in ptypes_used)
+        )
+        self._in_push = True
+        self._dbg_t_sim = self._dbg_t_sensors = 0.0
+        _t_loop = _t_write = _t_step = 0.0
 
-            self.force_trace.append(float(sensor0.data.net_forces_w[0, 0].norm()))
+        # Pre-compute per-pusher-type start/delta tensors (with world origins baked in)
+        # so the inner push loop can be two tensor ops instead of k scalar Python writes.
+        _ns_idxs = [i for i, (pt, _, _) in enumerate(strokes) if pt == 'ns']
+        _ew_idxs = [i for i, (pt, _, _) in enumerate(strokes) if pt == 'ew']
+
+        def _stroke_tensors(idxs):
+            if not idxs:
+                z = torch.empty(0, 3, dtype=torch.float32, device=self.device)
+                return z, z, torch.empty(0, dtype=torch.long, device=self.device)
+            starts = torch.tensor([strokes[i][1] for i in idxs], dtype=torch.float32)
+            ends   = torch.tensor([strokes[i][2] for i in idxs], dtype=torch.float32)
+            ox     = torch.tensor([self._env_origins_xy[i][0] for i in idxs], dtype=torch.float32)
+            oy     = torch.tensor([self._env_origins_xy[i][1] for i in idxs], dtype=torch.float32)
+            pos0   = starts.clone(); pos0[:, 0] += ox; pos0[:, 1] += oy
+            delta  = ends - starts   # bin-local delta; origin cancels in the difference
+            ids    = torch.tensor(idxs, dtype=torch.long)
+            return pos0.to(self.device), delta.to(self.device), ids.to(self.device)
+
+        _ns_pos0, _ns_delta, _ns_ids = _stroke_tensors(_ns_idxs)
+        _ew_pos0, _ew_delta, _ew_ids = _stroke_tensors(_ew_idxs)
+        _n_ns, _n_ew = len(_ns_idxs), len(_ew_idxs)
+        if _n_ns: self._batch_ids_ns[:_n_ns] = _ns_ids
+        if _n_ew: self._batch_ids_ew[:_n_ew] = _ew_ids
+        # Active slices — start as the full arrays, rebuilt only on force-stop events
+        _ns_pos0_a, _ns_delta_a, _ns_ids_a, n_ns_a = _ns_pos0, _ns_delta, _ns_ids, _n_ns
+        _ew_pos0_a, _ew_delta_a, _ew_ids_a, n_ew_a = _ew_pos0, _ew_delta, _ew_ids, _n_ew
+        _ns_active = torch.ones(_n_ns, dtype=torch.bool, device=self.device)
+        _ew_active = torch.ones(_n_ew, dtype=torch.bool, device=self.device)
+        _ns_env_to_pos = {env: p for p, env in enumerate(_ns_idxs)}
+        _ew_env_to_pos = {env: p for p, env in enumerate(_ew_idxs)}
+        _force_threshold_t = torch.tensor(self.force_threshold, device=self.device)
+
+        for step_i in tqdm(range(self.push_steps), desc='push', leave=False):
+            t = (step_i + 1) / self.push_steps
+            _t0 = time.perf_counter()
+            if n_ns_a:
+                self._batch_pose_ns[:n_ns_a, :3] = _ns_pos0_a + t * _ns_delta_a
+            if n_ew_a:
+                self._batch_pose_ew[:n_ew_a, :3] = _ew_pos0_a + t * _ew_delta_a
+            _t_loop += time.perf_counter() - _t0
+
+            _t0 = time.perf_counter()
+            if n_ns_a:
+                self.pusher_ns_obj.write_root_pose_to_sim(
+                    self._batch_pose_ns[:n_ns_a], env_ids=self._batch_ids_ns[:n_ns_a])
+            if n_ew_a:
+                self.pusher_ew_obj.write_root_pose_to_sim(
+                    self._batch_pose_ew[:n_ew_a], env_ids=self._batch_ids_ew[:n_ew_a])
+            _t_write += time.perf_counter() - _t0
+
+            _t0 = time.perf_counter()
+            self._step_sim(render=self.show_viewer)
+            _t_step += time.perf_counter() - _t0
+
+            _force_buf.append(sensor0.data.net_forces_w[0, 0].norm())
 
             if self.force_threshold > 0:
-                for env_idx, (ptype, start, end) in enumerate(strokes):
-                    if force_stopped[env_idx]:
-                        continue
-                    sensor = self.pusher_ns_sensor if ptype == 'ns' else self.pusher_ew_sensor
-                    force_mag = float(sensor.data.net_forces_w[env_idx, 0].norm())
-                    if force_mag > self.force_threshold:
-                        force_stopped[env_idx] = True
-                        obj = self.pusher_ns_obj if ptype == 'ns' else self.pusher_ew_obj
-                        self._set_pose(obj, self._park, _IDENTITY_QUAT, env_ids_list[env_idx])
-                if all(force_stopped):
+                # Vectorised force check: all comparisons stay on GPU; only one
+                # .any() sync per pusher type per step (vs k .item() syncs before).
+                # The inner loop only runs on actual stop events (rare).
+                if n_ns_a:
+                    ns_over = (self.pusher_ns_sensor.data.net_forces_w[_ns_ids_a, 0]
+                               .norm(dim=-1) > _force_threshold_t)
+                    for local_i in ns_over.nonzero(as_tuple=True)[0].tolist():
+                        env_idx = int(_ns_ids_a[local_i])
+                        self._set_pose(self.pusher_ns_obj, self._park, _IDENTITY_QUAT,
+                                       env_ids_list[env_idx], env_idx=env_idx)
+                        _ns_active[_ns_env_to_pos[env_idx]] = False
+                    if not _ns_active.all():
+                        _ns_pos0_a  = _ns_pos0[_ns_active]
+                        _ns_delta_a = _ns_delta[_ns_active]
+                        _ns_ids_a   = _ns_ids[_ns_active]
+                        n_ns_a = int(_ns_active.sum())
+                        if n_ns_a: self._batch_ids_ns[:n_ns_a] = _ns_ids_a
+                if n_ew_a:
+                    ew_over = (self.pusher_ew_sensor.data.net_forces_w[_ew_ids_a, 0]
+                               .norm(dim=-1) > _force_threshold_t)
+                    for local_i in ew_over.nonzero(as_tuple=True)[0].tolist():
+                        env_idx = int(_ew_ids_a[local_i])
+                        self._set_pose(self.pusher_ew_obj, self._park, _IDENTITY_QUAT,
+                                       env_ids_list[env_idx], env_idx=env_idx)
+                        _ew_active[_ew_env_to_pos[env_idx]] = False
+                    if not _ew_active.all():
+                        _ew_pos0_a  = _ew_pos0[_ew_active]
+                        _ew_delta_a = _ew_delta[_ew_active]
+                        _ew_ids_a   = _ew_ids[_ew_active]
+                        n_ew_a = int(_ew_active.sum())
+                        if n_ew_a: self._batch_ids_ew[:n_ew_a] = _ew_ids_a
+                if n_ns_a == 0 and n_ew_a == 0:
                     break
+        self._in_push = False
+        self.force_trace = torch.stack(_force_buf).cpu().tolist()
+        if self.debug:
+            n_steps = len(self.force_trace)
+            print(f'[perf] push {n_steps} steps × {k} envs | '
+                  f'loop={_t_loop*1000:.1f}ms  '
+                  f'write={_t_write*1000:.1f}ms  '
+                  f'step={_t_step*1000:.1f}ms (sim={self._dbg_t_sim*1000:.1f}ms '
+                  f'sensors={self._dbg_t_sensors*1000:.1f}ms)  '
+                  f'total={(_t_loop+_t_write+_t_step)*1000:.1f}ms')
 
         # 4. Park all pushers and settle
         for env_idx in range(k):
-            self._park_pushers(env_ids_list[env_idx])
+            self._park_pushers(env_ids_list[env_idx], env_idx=env_idx)
         for _ in range(4):
             self._step_sim(render=self.show_viewer)
 

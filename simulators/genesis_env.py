@@ -15,12 +15,22 @@ Can operate in single-env mode (n_envs=1) or parallel mode (n_envs>1).
 In parallel mode, multiple independent physics worlds are evaluated simultaneously on GPU.
 """
 
+import colorsys
 import os
 import tempfile
 import time
 import torch
 import genesis as gs
 from .base_env import SimulatorEnv
+
+
+def _obstacle_color(i: int, n: int) -> tuple:
+    """Blue-family color for obstacle i of n, spread from cyan-blue to indigo-blue."""
+    t = i / max(n - 1, 1)
+    hue = 0.55 + t * 0.17
+    sat = 0.65
+    val = 0.95 - t * 0.20
+    return colorsys.hsv_to_rgb(hue, sat, val)
 
 # Bin dimensions
 BIN_W = 1.0   # x extent
@@ -208,14 +218,14 @@ class BinEnv(SimulatorEnv):
 
         # --- obstacle objects ---
         self.obstacles = []
-        for _ in range(self.n_obstacles):
+        for oi in range(self.n_obstacles):
             obs = self.scene.add_entity(
                 gs.morphs.Box(
                     size=(OBJ_SIZE, OBJ_SIZE, OBJ_SIZE),
                     pos=(bw / 2, bd / 2, OBJ_H),
                 ),
                 material=gs.materials.Rigid(rho=500, friction=self.friction),
-                surface=gs.surfaces.Default(color=(0.3, 0.5, 0.9), opacity=0.6),
+                surface=gs.surfaces.Default(color=_obstacle_color(oi, self.n_obstacles), opacity=0.6),
             )
             self.obstacles.append(obs)
 

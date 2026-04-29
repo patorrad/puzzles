@@ -1,3 +1,4 @@
 name: rrt
 max_iter: 150
 max_depth: 12
+target_prob: 0.6

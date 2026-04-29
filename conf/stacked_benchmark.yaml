@@ -4,15 +4,21 @@ defaults:
   - _self_
 # Environment
 n_obstacles: 20
-parallel_envs: 16
+parallel_envs: 2048
 difficult_spawn: true
-bin_size_factor: 0.4      # auto bin_size = (n_obstacles+1) * OBJ_SIZE * this factor (ignored if bin_size is set)
+bin_size_factor: 0.3      # auto bin_size = (n_obstacles+1) * OBJ_SIZE * this factor (ignored if bin_size is set)
+push_steps: 64
+verify_push_steps: 256   # null = same as push_steps; integer = use this for verify + video
 
 # Benchmark
 seed: 0
 n_runs: 20
 base_seed: 0          # run i uses seed = base_seed + i
-n_z_levels: 2
+n_z_levels: 3
+target_z_level: 1  # null = floor; integer forces the target to that z level (0=floor, 1=stacked, ...)
+force_obstacle_on_target: true  # if true, one obstacle is placed on top of the target (requires n_z_levels > target_z_level + 1)
+
+show_viewer: true
 
 # Video (IsaacLab only)
 record_video: true

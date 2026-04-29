@@ -7,6 +7,7 @@ Supports both single-env mode (n_envs=1) and parallel mode (n_envs>1).
 """
 
 from abc import ABC, abstractmethod
+from contextlib import contextmanager
 import torch
 from typing import Dict, Tuple, List, Optional
 
@@ -60,7 +61,8 @@ class SimulatorEnv(ABC):
                  bin_size: Optional[float] = None,
                  bin_size_factor: float = 0.9,
                  debug: bool = False,
-                 target_z_level: Optional[int] = None):
+                 target_z_level: Optional[int] = None,
+                 force_obstacle_on_target: bool = False):
         self.n_obstacles = n_obstacles
         self.n_envs = n_envs
         self.show_viewer = show_viewer
@@ -69,6 +71,7 @@ class SimulatorEnv(ABC):
         self.stackable = stackable
         self.n_z_levels = n_z_levels
         self.target_z_level = target_z_level
+        self.force_obstacle_on_target = force_obstacle_on_target
         self.push_steps = push_steps
         self.substeps = substeps
         self.wall_thickness = wall_thickness
@@ -284,6 +287,19 @@ class SimulatorEnv(ABC):
     def step_physics(self) -> None:
         """Advance physics one tick with no action. Override in each backend."""
         raise NotImplementedError
+
+    @contextmanager
+    def push_steps_ctx(self, steps: Optional[int]):
+        """Temporarily override self.push_steps. No-op if steps is None."""
+        if steps is None:
+            yield
+        else:
+            old = self.push_steps
+            self.push_steps = steps
+            try:
+                yield
+            finally:
+                self.push_steps = old
 
     # ------------------------------------------------------------------
     # Convenience methods

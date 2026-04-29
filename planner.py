@@ -27,6 +27,7 @@ Each "action" is a push:
 
 import copy
 import math
+import random
 import time
 import torch
 from tqdm import tqdm
@@ -45,6 +46,7 @@ def _hash_action(action: dict) -> tuple:
 
 
 def _sample_action(state: dict, env: SimulatorEnv,
+                   target_prob: float = 0.6,
                    bias_toward_exit: bool = True, recurse_depth = 0, max_recurse_depth = 10, sampled_actions = {}) -> dict:
     """Sample a random action from the discrete action space.
 
@@ -55,7 +57,7 @@ def _sample_action(state: dict, env: SimulatorEnv,
       push_z      : float – discrete z level from env.z_levels
     """
 
-    
+
     # Build (N+1, 3) position array: [target, obs0, obs1, ...]
     all_pos_3d = torch.stack([
         state['target_pos'][:3],
@@ -63,9 +65,12 @@ def _sample_action(state: dict, env: SimulatorEnv,
     ])
 
     # Bias toward acting on the target
-    obj_probs = torch.ones(len(all_pos_3d))
-    obj_probs[0] *= len(all_pos_3d)
-    obj_probs /= obj_probs.sum()
+    n_objs = len(all_pos_3d)
+    if n_objs > 1:
+        obs_prob = (1.0 - target_prob) / (n_objs - 1)
+        obj_probs = torch.tensor([target_prob] + [obs_prob] * (n_objs - 1))
+    else:
+        obj_probs = torch.tensor([1.0])
     obj_idx = torch.multinomial(obj_probs, 1).item()
 
     push_pos = all_pos_3d[obj_idx, :2]
@@ -82,7 +87,7 @@ def _sample_action(state: dict, env: SimulatorEnv,
             'push_pos': push_pos, 'push_z': push_z}
 
     if recurse_depth < max_recurse_depth and _hash_action(action) in sampled_actions:
-        return _sample_action(state, env, bias_toward_exit, recurse_depth + 1, max_recurse_depth, sampled_actions)
+        return _sample_action(state, env, target_prob, bias_toward_exit, recurse_depth + 1, max_recurse_depth, sampled_actions)
     else:
         return action
 
@@ -124,6 +129,77 @@ def _verify_plan(env: SimulatorEnv, plan: list[dict], root_state: dict,
     return successes, avg_reward
 
 
+def _verify_all_plans(
+    env: SimulatorEnv,
+    plans_and_nodes: list,
+    root_state: dict,
+    total_envs: int,
+    min_verify_envs: int,
+    verbose: bool = True,
+) -> list:
+    """Verify multiple plans simultaneously by interleaving their env slots.
+
+    Within each round all plans run in a single pass: one batch_evaluate call
+    per timestep with every plan's env slots included together. Plans shorter
+    than the longest stop contributing pairs after their final action; their
+    states are frozen at the correct terminal position.
+
+    Rounds are used when N * min_verify_envs > total_envs so that every plan
+    always receives at least min_verify_envs environments.
+
+    Returns list of (plan, node, successes, n_tries, avg_reward).
+    """
+    n = len(plans_and_nodes)
+    states_per_round = max(1, total_envs // min_verify_envs)
+    all_results = []
+
+    prev_show_viewer = env.show_viewer
+    env.show_viewer = True
+    try:
+        for round_start in range(0, n, states_per_round):
+            batch = plans_and_nodes[round_start : round_start + states_per_round]
+            envs_each = max(min_verify_envs, total_envs // len(batch))
+
+            if verbose:
+                print(f'  Verifying {len(batch)} plan(s) in parallel ({envs_each} envs each)...')
+
+            plans = [p for p, _ in batch]
+            plan_offsets = [i * envs_each for i in range(len(batch))]
+            flat_states = [copy.deepcopy(root_state)
+                           for _ in range(len(batch) * envs_each)]
+
+            max_len = max(len(p) for p in plans)
+            for step in range(max_len):
+                pairs = []
+                active = []  # flat index for each pair, used to splice results back
+                for pi, plan in enumerate(plans):
+                    if step < len(plan):
+                        action = plan[step]
+                        base = plan_offsets[pi]
+                        for j in range(envs_each):
+                            pairs.append((flat_states[base + j], action))
+                            active.append(base + j)
+                if not pairs:
+                    break
+                results = env.batch_evaluate(pairs)
+                for flat_idx, (new_state, _, _) in zip(active, results):
+                    flat_states[flat_idx] = new_state
+
+            for pi, (plan, node) in enumerate(batch):
+                base = plan_offsets[pi]
+                plan_states = flat_states[base : base + envs_each]
+                rewards = [env._compute_reward(s) for s in plan_states]
+                avg_reward = sum(rewards) / len(rewards)
+                successes = sum(1 for s in plan_states if env._is_goal(s))
+                if verbose:
+                    print(f'    -> {successes}/{envs_each} succeeded, avg_reward={avg_reward:.3f}')
+                all_results.append((plan, node, successes, envs_each, avg_reward))
+    finally:
+        env.show_viewer = prev_show_viewer
+
+    return all_results
+
+
 # ===========================================================================
 # Planner base
 # ===========================================================================
@@ -131,9 +207,13 @@ def _verify_plan(env: SimulatorEnv, plan: list[dict], root_state: dict,
 class _PlannerBase:
     """Shared behaviour for RRTPusher and MCTSPusher."""
 
-    def __init__(self, env: SimulatorEnv, verify_threshold: float, seed: int | None):
+    def __init__(self, env: SimulatorEnv, verify_threshold: float,
+                 min_verify_envs: int, seed: int | None,
+                 verify_push_steps: int | None = None):
         self.env = env
         self.verify_threshold = verify_threshold
+        self.min_verify_envs = min_verify_envs
+        self.verify_push_steps = verify_push_steps
         self.batch_size = env.n_envs  # 1 for single, n_envs for parallel
         if seed is not None:
             torch.manual_seed(seed)
@@ -156,25 +236,32 @@ class _PlannerBase:
                 n_simulations=cfg.planner.n_simulations,
                 rollout_depth=cfg.planner.rollout_depth,
                 max_depth=cfg.planner.max_depth,
+                target_prob=cfg.planner.target_prob,
                 seed=seed,
                 verify_threshold=cfg.verify_threshold,
+                min_verify_envs=cfg.min_verify_envs,
+                verify_push_steps=cfg.get('verify_push_steps', None),
             )
         else:
             return RRTPusher(
                 env=env,
                 max_iter=cfg.planner.max_iter,
                 max_depth=cfg.planner.max_depth,
+                target_prob=cfg.planner.target_prob,
                 seed=seed,
                 verify_threshold=cfg.verify_threshold,
+                min_verify_envs=cfg.min_verify_envs,
+                verify_push_steps=cfg.get('verify_push_steps', None),
             )
 
     def verify(self, plan: list[dict], initial_state: dict,
                verbose: bool = True) -> tuple[int, float, float, bool]:
         """Re-run plan self.batch_size times in parallel and return (successes, avg_reward, rate, passed)."""
-        successes, avg_reward = _verify_plan(
-            self.env, plan, initial_state,
-            n_tries=self.batch_size, verbose=verbose,
-        )
+        with self.env.push_steps_ctx(self.verify_push_steps):
+            successes, avg_reward = _verify_plan(
+                self.env, plan, initial_state,
+                n_tries=self.batch_size, verbose=verbose,
+            )
         rate = successes / self.batch_size
         passed = rate >= self.verify_threshold
         return successes, avg_reward, rate, passed
@@ -218,12 +305,14 @@ class RRTPusher(_PlannerBase):
     """
 
     def __init__(self, env: SimulatorEnv, max_iter: int = 200, max_depth: int = 15,
-                 goal_bias: float = 0.3, seed: int | None = 42,
-                 verify_threshold: float = 0.75):
-        super().__init__(env, verify_threshold, seed)
+                 goal_bias: float = 0.3, target_prob: float = 0.6, seed: int | None = 42,
+                 verify_threshold: float = 0.75, min_verify_envs: int = 16,
+                 verify_push_steps: int | None = None):
+        super().__init__(env, verify_threshold, min_verify_envs, seed, verify_push_steps)
         self.max_iter = max_iter
         self.max_depth = max_depth
         self.goal_bias = goal_bias
+        self.target_prob = target_prob
         self.tree: list[RRTNode] = []   # populated after plan()
         self.best_node: RRTNode | None = None
 
@@ -290,7 +379,7 @@ class RRTPusher(_PlannerBase):
                           f'best={best_reward:.3f}  [Enter to push]')
 
             # --- sample one action per node and batch-evaluate ---
-            actions = [_sample_action(n.state, self.env, bias_toward_exit=True)
+            actions = [_sample_action(n.state, self.env, target_prob=self.target_prob, bias_toward_exit=True)
                        for n in expand_nodes]
             pairs = list(zip([n.state for n in expand_nodes], actions))
             results = self.env.batch_evaluate(pairs)
@@ -325,11 +414,14 @@ class RRTPusher(_PlannerBase):
                     goal_node = new_node
 
             if goal_node is not None:
+                prev_best_reward = best_reward
+                prev_best_node = best_node
                 if verbose:
                     print(f'  Goal reached at iter {i+1}!')
                 path = self._extract_path(goal_node)
-                verified, avg_reward = _verify_plan(self.env, path, root.state,
-                                                     self.batch_size, verbose)
+                with self.env.push_steps_ctx(self.verify_push_steps):
+                    verified, avg_reward = _verify_plan(self.env, path, root.state,
+                                                         self.batch_size, verbose)
                 if verified >= self.batch_size * self.verify_threshold:
                     goal_node.reward = avg_reward
                     if verbose:
@@ -343,6 +435,8 @@ class RRTPusher(_PlannerBase):
                     self.tree = tree
                     self.best_node = goal_node
                     return path
+                best_reward = prev_best_reward
+                best_node = prev_best_node
                 goal_node.dead_end = True  # prune so RRT doesn't revisit this failed path
                 goal_node = None
 
@@ -497,13 +591,15 @@ class MCTSPusher(_PlannerBase):
 
     def __init__(self, env: SimulatorEnv, n_simulations: int = 100,
                  rollout_depth: int = 5, max_depth: int = 10,
-                 c_ucb: float = 1.4, seed: int | None = 42,
-                 verify_threshold: float = 0.75):
-        super().__init__(env, verify_threshold, seed)
+                 c_ucb: float = 1.4, target_prob: float = 0.6, seed: int | None = 42,
+                 verify_threshold: float = 0.75, min_verify_envs: int = 16,
+                 verify_push_steps: int | None = None):
+        super().__init__(env, verify_threshold, min_verify_envs, seed, verify_push_steps)
         self.n_simulations = n_simulations
         self.rollout_depth = rollout_depth
         self.max_depth = max_depth
         self.c_ucb = c_ucb
+        self.target_prob = target_prob
         self.root: MCTSNode | None = None    # populated after plan()
         self.best_leaf: MCTSNode | None = None
 
@@ -516,6 +612,7 @@ class MCTSPusher(_PlannerBase):
         root = MCTSNode(state=copy.deepcopy(initial_state), depth=0)
         best_leaf: MCTSNode | None = None
         best_reward = self.env._compute_reward(initial_state)
+        best_node_reward = best_reward
 
         t0 = time.time()
         n_sims = self.n_simulations // self.batch_size
@@ -527,22 +624,53 @@ class MCTSPusher(_PlannerBase):
             rollout_rewards = self._rollout(nodes)
             self._backprop(nodes, rollout_rewards)
 
-            goal_node = None
+            goal_nodes = []
             for node, reward in zip(nodes, rollout_rewards):
+                node_reward = self.env._compute_reward(node.state)
                 if reward > best_reward:
                     best_reward = reward
                     best_leaf = node
-                    pbar.set_postfix(best_reward=f'{best_reward:.3f}')
-                if node.done and not node.dead_end and goal_node is None:
-                    goal_node = node
+                if node_reward > best_node_reward:
+                    best_node_reward = node_reward
+                    pbar.set_postfix(best=f'{best_node_reward:.3f}')
+                    if verbose:
+                        comps = self.env.compute_reward_components(node.state)
+                        print(f'  New best node={node_reward:.3f} (rollout={reward:.3f}) (sim {sim_i+1}) | '
+                              + ' | '.join(f'{k}={v:.3f}' for k, v in comps.items())
+                              + f' | done={node.done} obstacles_dropped={self.env._obstacles_dropped(node.state)}')
+                if node.done and not node.dead_end:
+                    goal_nodes.append(node)
 
-            if goal_node is not None:
+            if goal_nodes:
+                prev_best_reward = best_reward
+                prev_best_leaf = best_leaf
                 if verbose:
-                    print(f'  MCTS: Goal reached at simulation {sim_i+1}!')
-                path = self._extract_path(goal_node)
-                verified, avg_reward = _verify_plan(self.env, path, root.state,
-                                                     self.batch_size, verbose)
-                if verified >= self.batch_size * self.verify_threshold:
+                    print(f'  MCTS: {len(goal_nodes)} goal(s) reached at simulation {sim_i+1}!')
+
+                # Deduplicate by action sequence
+                seen: set = set()
+                unique: list = []
+                for node in goal_nodes:
+                    path = self._extract_path(node)
+                    sig = tuple(tuple(sorted(a.items())) for a in path)
+                    if sig not in seen:
+                        seen.add(sig)
+                        unique.append((path, node))
+
+                with self.env.push_steps_ctx(self.verify_push_steps):
+                    verify_results = _verify_all_plans(
+                        self.env, unique, root.state,
+                        self.batch_size, self.min_verify_envs, verbose,
+                    )
+
+                best_verified = max(
+                    ((p, n, s, t, r) for p, n, s, t, r in verify_results
+                     if s >= t * self.verify_threshold),
+                    key=lambda x: x[4],
+                    default=None,
+                )
+                if best_verified is not None:
+                    path, goal_node, _, _, avg_reward = best_verified
                     goal_node.total_reward = avg_reward
                     goal_node.visits = 1
                     if verbose:
@@ -554,8 +682,12 @@ class MCTSPusher(_PlannerBase):
                     self.root = root
                     self.best_leaf = goal_node
                     return path
-                goal_node.dead_end = True  # prune so MCTS doesn't revisit this failed path
-                goal_node = None
+
+                # None passed — restore and prune all
+                best_reward = prev_best_reward
+                best_leaf = prev_best_leaf
+                for _, node, _, _, _ in verify_results:
+                    node.dead_end = True
 
             if verbose and (sim_i + 1) % 10 == 0:
                 elapsed = time.time() - t0
@@ -594,12 +726,12 @@ class MCTSPusher(_PlannerBase):
         for node in nodes:
             if node.done or node.dead_end or node.depth >= self.max_depth:
                 continue
-            for _ in range(self.env.n_envs):
-                action = _sample_action(node.state, self.env,
-                                        sampled_actions=node.sampled_actions)
-                node.sampled_actions[_hash_action(action)] = True
-                pairs.append((node.state, action))
-                node_for_pair.append(node)
+            action = _sample_action(node.state, self.env,
+                                    target_prob=self.target_prob,
+                                    sampled_actions=node.sampled_actions)
+            node.sampled_actions[_hash_action(action)] = True
+            pairs.append((node.state, action))
+            node_for_pair.append(node)
 
         if pairs:
             results = self.env.batch_evaluate(pairs)
@@ -632,23 +764,43 @@ class MCTSPusher(_PlannerBase):
         states = [copy.deepcopy(n.state) for n in nodes]
         active = list(range(len(states)))
         best_rewards = [self.env._compute_reward(s) for s in states]
+        slot_to_node = list(range(len(states)))
+        total_terminals = 0
 
-        for _ in range(self.rollout_depth):
+        for step in range(self.rollout_depth):
             if not active:
                 break
-            pairs = [(states[i], _sample_action(states[i], self.env)) for i in active]
+            pairs = [(states[i], _sample_action(states[i], self.env, target_prob=self.target_prob)) for i in active]
             results = self.env.batch_evaluate(pairs)
 
             still_active = []
+            terminated = []
             for slot, i in enumerate(active):
                 new_state, reward, done = results[slot]
                 states[i] = new_state
-                best_rewards[i] = max(best_rewards[i], reward)
+                node_idx = slot_to_node[i]
+                best_rewards[node_idx] = max(best_rewards[node_idx], reward)
                 if done:
-                    best_rewards[i] = 1.0
-                if not self.env._obstacles_dropped(new_state):
+                    best_rewards[node_idx] = 1.0
+                if done or self.env._obstacles_dropped(new_state):
+                    terminated.append(i)
+                else:
+                    still_active.append(i)
+
+            if self.env.debug and terminated:
+                print(f'  [rollout step {step}] {len(terminated)} terminal(s): {len(still_active)} still active')
+            total_terminals += len(terminated)
+
+            for i in terminated:
+                if still_active:
+                    j = random.choice(still_active)
+                    states[i] = copy.deepcopy(states[j])
+                    slot_to_node[i] = slot_to_node[j]
                     still_active.append(i)
             active = still_active
+
+        if self.env.debug:
+            print(f'  [rollout] {total_terminals} terminal(s) across {self.rollout_depth} steps ({len(nodes)} slots)')
 
         for i, node in enumerate(nodes):
             if node.done:

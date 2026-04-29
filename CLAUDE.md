@@ -10,11 +10,11 @@ Physics-based bin-clearing planner: move a red target object out the south openi
 
 Conda env: `genesistest2`. Requires Genesis 0.3.11, CUDA, PyTorch 2.9.1+cu130. Genesis simulator must be installed separately.
 
+Always use the conda environment `genesis_mpc` for genesis runs, or `isaaclab_mpc` for isaaclab runs.
+
 ## Running
 
 Configuration is managed via [Hydra](https://hydra.cc/) with config files in `conf/`. The entry point is `main.py`.
-
-Always use the conda environemnt genesis_mpc for genesis runs, or isaaclab_mpc for isaaclab runs.
 
 ```bash
 # Default: MCTS with Genesis, 2 obstacles, 8 parallel envs
@@ -35,9 +35,26 @@ python main.py save=solution.json no_replay=true
 
 # Visualize search tree (matplotlib)
 python main.py visualize=true
+
+# Multi-z-level (stacked objects)
+python main.py n_z_levels=2 target_z_level=1
 ```
 
-Key config defaults (`conf/config.yaml`): `parallel_envs=8`, `push_steps=160`, `wall_thickness=0.25`, `verify_threshold=0.75`.
+Key config defaults (`conf/config.yaml`): `parallel_envs=8`, `push_steps=128`, `wall_thickness=0.25`, `verify_threshold=0.75`, `n_z_levels=1`, `target_z_level=null`, `bin_size_factor=0.9`.
+
+### Benchmark
+
+`benchmark.py` is a multi-run evaluation harness with WandB integration. It runs `n_runs` independent planning attempts and aggregates success rate, plan length, sim call counts, timing, and reward breakdown.
+
+```bash
+# 20-run benchmark: IsaacLab, 20 obstacles, WandB logging
+python benchmark.py --config-name=benchmark
+
+# Stacked scenario: 10 obstacles, target forced to z-level 1
+python benchmark.py --config-name=stacked_benchmark
+```
+
+IsaacLab runs support video recording via `env.record_replay()`.
 
 ## Architecture
 
@@ -51,13 +68,15 @@ Key config defaults (`conf/config.yaml`): `parallel_envs=8`, `push_steps=160`, `
 
 Simulator backends: `BinEnvGenesis` (default), `BinEnvIsaacGym`, `BinEnvIsaacLab`. Imports are lazy in `simulators/__init__.py` so missing dependencies don't cause import errors.
 
+`simulators/placement.py` — Shared, simulator-agnostic initial-state generation (pure PyTorch/NumPy). `random_initial_state()` places objects with proximity-based column stacking: if a sampled position lands within `OBJ_SIZE × 1.05` of an existing column it stacks on that column instead of retrying. `target_z_level` controls target height (`null` = random from occupied levels, `0` = floor, `1+` = stacked on an obstacle column).
+
 ### Planners (`planner.py`)
 
 Both planners use `env.batch_evaluate()` and work in single-env or parallel-env mode transparently.
 
-**`MCTSPusher`** — Monte-Carlo Tree Search with UCB1 selection. Phases: select → expand → rollout → backprop. Uses virtual visits to handle parallel node expansion. Key params: `n_simulations`, `rollout_depth`, `max_depth`, `c_ucb`.
+**`MCTSPusher`** — Monte-Carlo Tree Search with UCB1 selection. Phases: select → expand → rollout → backprop. Uses virtual visits to handle parallel node expansion. Key params: `n_simulations=2000`, `rollout_depth=5`, `max_depth=10`, `c_ucb`.
 
-**`RRTPusher`** — RRT over push actions. Selects nodes weighted by reward, samples random actions, adds new nodes if they improve position. Supports Genesis debug-draw visualization during search.
+**`RRTPusher`** — RRT over push actions. Selects nodes weighted by reward, samples random actions, adds new nodes if they improve position. Supports Genesis debug-draw visualization during search. Key params: `max_iter=150`, `max_depth=12`.
 
 Both planners call `_verify_plan()` when a goal is found, re-running the full plan `n_tries` times in parallel to confirm robustness before returning.
 
@@ -66,23 +85,32 @@ Both planners call `_verify_plan()` when a goal is found, re-running the full pl
 Actions are dicts: `{action_type, obj_idx, push_pos, push_z}`.
 - `action_type`: `push_n`, `pull_s`, `push_e`, `push_w`
 - `obj_idx`: 0 = target, 1..N = obstacles
+- `push_z`: discrete height sampled from `env.z_levels` (e.g. `[OBJ_H, OBJ_H + OBJ_SIZE]` for 2 levels)
 - Sampling is biased: target gets higher probability; `pull_s`/`push_n` get higher weight (45% each) vs east/west (5% each)
 
 ### Hydra config structure
 
 ```
 conf/
-  config.yaml         # root defaults + runtime flags
-  simulator/          # genesis.yaml, isaaclab.yaml, isaacgym.yaml
-  planner/            # mcts.yaml, rrt.yaml
-  reward/             # default.yaml (target_progress, obstacle_penalty, path_blocker)
-  benchmark.yaml
-  many_objects.yaml   # preset for more obstacles
+  config.yaml               # root defaults + runtime flags
+  simulator/                # genesis.yaml, isaaclab.yaml, isaacgym.yaml
+  planner/                  # mcts.yaml, rrt.yaml
+  reward/                   # default.yaml (target_progress, obstacle_penalty=0.5, path_blocker=0.5)
+  benchmark.yaml            # 20-run preset: IsaacLab, 20 obstacles, WandB
+  stacked_benchmark.yaml    # stacked preset: 10 obstacles, 2 z-levels, target_z_level=1
+  many_objects.yaml         # preset for more obstacles
 ```
+
+IsaacLab-specific params in `conf/simulator/isaaclab.yaml`: `force_threshold` (N, stops pusher early on contact; 0 to disable), `position_iterations`, `velocity_iterations` (PhysX solver quality).
 
 ### Replay
 
 For Genesis/IsaacGym, replay is launched as a subprocess (Genesis reinitializes its CUDA context). For IsaacLab, `env.replay()` is called directly. The `replay_file` config key is used internally by the subprocess mechanism.
+
+### Tests
+
+- `test_placement.py` — unit tests for `simulators/placement.py` (no simulator required); covers `target_z_level` values 0/1/null and placement invariants (no column collisions, within bin bounds)
+- `test_rewards.py` — reward logic tests
 
 ### Value function training (`train_value.py`)
 

@@ -23,6 +23,7 @@ def _place_objects_once(
     bin_d: float,
     n_z_levels: int = 1,
     target_z_level: int | None = None,
+    force_obstacle_on_target: bool = False,
 ) -> dict:
     """Single placement attempt. Caller is responsible for seeding."""
     margin   = OBJ_SIZE * 0.7
@@ -52,7 +53,8 @@ def _place_objects_once(
         if is_target and _target_z > 0:
             # Find a column that already has exactly target_z_level objects so
             # the target sits at that height with full support beneath it.
-            eligible = [(i, c) for i, c in enumerate(columns) if c[2] == _target_z]
+            eligible = [(i, c) for i, c in enumerate(columns)
+                        if c[2] == _target_z and (not difficult_spawn or c[1] >= bin_d / 2)]
             if eligible:
                 idx = int(torch.randint(len(eligible), (1,)).item())
                 choice_i, (x, y, count) = eligible[idx]
@@ -96,6 +98,28 @@ def _place_objects_once(
                 positions.append([bin_w / 2, bin_d / 2, OBJ_H])
                 columns.append((bin_w / 2, bin_d / 2, 1))
 
+    # If the target didn't land at the requested level, swap with an obstacle at that level.
+    if n_obstacles > 0 and _target_z is not None and _target_z > 0:
+        target_z_height = OBJ_H + OBJ_SIZE * _target_z
+        if abs(positions[n_obstacles][2] - target_z_height) > 1e-4:
+            for obs_idx in range(n_obstacles):
+                if abs(positions[obs_idx][2] - target_z_height) < 1e-4:
+                    if difficult_spawn and positions[obs_idx][1] < bin_d / 2:
+                        continue
+                    positions[n_obstacles], positions[obs_idx] = positions[obs_idx], positions[n_obstacles]
+                    break
+
+    # Force one obstacle directly on top of the target if requested and there is room above it.
+    if force_obstacle_on_target and n_obstacles > 0 and _target_z is not None and _target_z + 1 < n_z_levels:
+        target_x, target_y = positions[n_obstacles][0], positions[n_obstacles][1]
+        above_z = OBJ_H + OBJ_SIZE * (_target_z + 1)
+        sep = OBJ_SIZE * 1.05
+        for obs_idx in range(n_obstacles):
+            ox, oy = positions[obs_idx][0], positions[obs_idx][1]
+            if ((ox - target_x) ** 2 + (oy - target_y) ** 2) ** 0.5 >= sep:
+                positions[obs_idx] = [target_x, target_y, above_z]
+                break
+
     identity = [1.0, 0.0, 0.0, 0.0]
     # Sort obstacles by ascending z so lower objects are placed first in
     # sequential simulators (e.g. IsaacLab), ensuring support before stacking.
@@ -135,6 +159,7 @@ def random_initial_state(
     debug: bool = False,
     n_z_levels: int = 1,
     target_z_level: Optional[int] = None,
+    force_obstacle_on_target: bool = False,
 ) -> dict:
     """
     Generate a random non-overlapping initial state dict (pure PyTorch, no simulator).
@@ -179,7 +204,8 @@ def random_initial_state(
     state = None
     for attempt in range(attempts):
         state = _place_objects_once(n_obstacles, stackable, difficult_spawn, bin_w, bin_d, n_z_levels,
-                                    target_z_level=target_z_level)
+                                    target_z_level=target_z_level,
+                                    force_obstacle_on_target=force_obstacle_on_target)
         if not difficult_spawn:
             return state
         pb = _path_blocker_value(state, n_obstacles)

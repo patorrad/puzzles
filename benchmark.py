@@ -158,7 +158,7 @@ def _run_once(env, cfg: DictConfig, run_idx: int, seed: int, initial_state=None)
     planner = _PlannerBase.from_cfg(env, cfg, seed)
 
     t0 = time.time()
-    plan = planner.plan(initial_state, verbose=False)
+    plan = planner.plan(initial_state, verbose=cfg.debug)
     plan_time = time.time() - t0
 
     batch_calls = env.batch_calls
@@ -227,14 +227,15 @@ def main(cfg: DictConfig) -> None:
     # enable_cameras loads omni.replicator so record_replay() can capture frames.
     # Both env vars must be set before _build_env() imports the module.
     if cfg.simulator.name == 'isaaclab':
-        os.environ['ISAACLAB_HEADLESS'] = '1'
+        if not cfg.show_viewer:
+            os.environ['ISAACLAB_HEADLESS'] = '1'
         if cfg.record_video:
             os.environ['ISAACLAB_ENABLE_CAMERAS'] = '1'
 
     print(f'Building environment ({cfg.simulator.name}): '
           f'{cfg.n_obstacles} obstacle(s), parallel_envs={cfg.parallel_envs}')
     from simulators import build_env
-    env = build_env(cfg, n_envs=cfg.parallel_envs)
+    env = build_env(cfg, n_envs=cfg.parallel_envs, show_viewer=cfg.show_viewer)
 
     # Init wandb after the simulator — Isaac Sim's AppLauncher does process-level
     # setup (signal handlers, CUDA contexts) that can corrupt wandb's upload thread
@@ -275,11 +276,13 @@ def main(cfg: DictConfig) -> None:
             print(f'  Benchmark verify: {verify_successes}/{env.n_envs} '
                   f'({verify_rate:.0%}) — {"PASS" if verify_passed else "FAIL"}')
 
-            if record_video and verify_passed:
-                video_path = os.path.join(video_dir, f'run_{i:03d}_seed_{seed}.mp4')
+            if record_video:
+                suffix = 'pass' if verify_passed else 'verify_fail'
+                video_path = os.path.join(video_dir, f'run_{i:03d}_seed_{seed}_{suffix}.mp4')
                 print(f'  Recording video → {video_path}')
                 try:
-                    result.video_path = env.record_replay(plan, initial_state, video_path=video_path)
+                    with env.push_steps_ctx(cfg.get('verify_push_steps', None)):
+                        result.video_path = env.record_replay(plan, initial_state, video_path=video_path)
                     if result.video_path is not None:
                         final_state = env.get_state(0)
                     else:

@@ -6,7 +6,7 @@ target_progress:
 
 obstacle_penalty:
   enabled: true   # penalise each obstacle that leaves the bin
-  weight: 0.5
+  weight: 5.0
 
 path_blocker:
   enabled: true   # penalise obstacles inside the bin that are south of the target (blocking exit path)

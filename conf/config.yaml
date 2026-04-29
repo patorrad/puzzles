@@ -14,14 +14,18 @@ debug: true
 friction: 1.0
 n_z_levels: 1
 target_z_level: null  # null = floor; integer forces the target to that z level (0=floor, 1=stacked, ...)
-push_steps: 512
+force_obstacle_on_target: false  # if true, one obstacle is placed on top of the target (requires n_z_levels > target_z_level + 1)
+push_steps: 128
+verify_push_steps: null   # null = same as push_steps; integer = use this for verify + video
 substeps: 4
 wall_thickness: 0.25
 parallel_envs: 8
 seed: null
 
+
 # Runtime
 verify_threshold: 0.75   # fraction of envs that must succeed to accept a plan
+min_verify_envs: 16      # minimum envs allocated per plan during multi-plan verification
 show_during_planning: false
 show_viewer: false
 no_replay: false
