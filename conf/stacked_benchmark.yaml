@@ -18,7 +18,7 @@ n_z_levels: 3
 target_z_level: 1  # null = floor; integer forces the target to that z level (0=floor, 1=stacked, ...)
 force_obstacle_on_target: true  # if true, one obstacle is placed on top of the target (requires n_z_levels > target_z_level + 1)
 
-show_viewer: true
+viewer: always
 
 # Video (IsaacLab only)
 record_video: true

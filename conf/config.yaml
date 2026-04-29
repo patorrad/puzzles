@@ -1,5 +1,5 @@
 defaults:
-  - simulator: genesis
+  - simulator: isaaclab
   - planner: mcts
   - reward: default
   - _self_
@@ -26,8 +26,7 @@ seed: null
 # Runtime
 verify_threshold: 0.75   # fraction of envs that must succeed to accept a plan
 min_verify_envs: 16      # minimum envs allocated per plan during multi-plan verification
-show_during_planning: false
-show_viewer: false
+viewer: always        # headless | replay | verify | always
 no_replay: false
 visualize: false
 visualize_search: false

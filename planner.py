@@ -108,8 +108,10 @@ def _verify_plan(env: SimulatorEnv, plan: list[dict], root_state: dict,
     if verbose:
         print(f'  Verifying plan ({n_tries} parallel tries)...')
 
-    prev_show_viewer = env.show_viewer
-    env.show_viewer = True
+    render_verify = getattr(env, 'viewer_mode', 'replay') in ('always', 'verify')
+    if render_verify:
+        prev_show_viewer = env.show_viewer
+        env.show_viewer = True
 
     try:
         states = [copy.deepcopy(root_state) for _ in range(n_tries)]
@@ -119,7 +121,8 @@ def _verify_plan(env: SimulatorEnv, plan: list[dict], root_state: dict,
             results = env.batch_evaluate(pairs)
             states = [new_state for new_state, _, _ in results]
     finally:
-        env.show_viewer = prev_show_viewer
+        if render_verify:
+            env.show_viewer = prev_show_viewer
 
     rewards = [env._compute_reward(s) for s in states]
     avg_reward = sum(rewards) / len(rewards)
@@ -153,8 +156,10 @@ def _verify_all_plans(
     states_per_round = max(1, total_envs // min_verify_envs)
     all_results = []
 
-    prev_show_viewer = env.show_viewer
-    env.show_viewer = True
+    render_verify = getattr(env, 'viewer_mode', 'replay') in ('always', 'verify')
+    if render_verify:
+        prev_show_viewer = env.show_viewer
+        env.show_viewer = True
     try:
         for round_start in range(0, n, states_per_round):
             batch = plans_and_nodes[round_start : round_start + states_per_round]
@@ -195,7 +200,8 @@ def _verify_all_plans(
                     print(f'    -> {successes}/{envs_each} succeeded, avg_reward={avg_reward:.3f}')
                 all_results.append((plan, node, successes, envs_each, avg_reward))
     finally:
-        env.show_viewer = prev_show_viewer
+        if render_verify:
+            env.show_viewer = prev_show_viewer
 
     return all_results
 

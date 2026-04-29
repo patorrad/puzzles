@@ -8,7 +8,7 @@ don't cause errors when using a different backend.
 from .base_env import SimulatorEnv
 
 
-def build_env(cfg, n_envs: int, show_viewer: bool = False):
+def build_env(cfg, n_envs: int, show_viewer: bool = False, viewer_mode: str = 'replay'):
     """Instantiate the correct simulator backend from a Hydra config."""
     sim = cfg.simulator.name
     if sim == 'genesis':
@@ -24,6 +24,7 @@ def build_env(cfg, n_envs: int, show_viewer: bool = False):
     return BinEnv(
         n_obstacles=cfg.n_obstacles,
         show_viewer=show_viewer,
+        viewer_mode=viewer_mode,
         seed=cfg.seed,
         stackable=cfg.stackable,
         friction=cfg.friction,

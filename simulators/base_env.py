@@ -62,10 +62,12 @@ class SimulatorEnv(ABC):
                  bin_size_factor: float = 0.9,
                  debug: bool = False,
                  target_z_level: Optional[int] = None,
-                 force_obstacle_on_target: bool = False):
+                 force_obstacle_on_target: bool = False,
+                 viewer_mode: str = 'replay'):
         self.n_obstacles = n_obstacles
         self.n_envs = n_envs
         self.show_viewer = show_viewer
+        self.viewer_mode = viewer_mode
         self.friction = friction
         self.dt = dt
         self.stackable = stackable
