@@ -266,10 +266,7 @@ def main(cfg: DictConfig) -> None:
     if sim_name == 'isaaclab' and viewer_mode == 'headless':
         os.environ['ISAACLAB_HEADLESS'] = '1'
 
-    if sim_name == 'isaaclab':
-        show_viewer = viewer_mode == 'always'
-    else:
-        show_viewer = viewer_mode == 'always' or cfg.visualize_search or cfg.pause_search
+    show_viewer = viewer_mode == 'always'
 
     print(f'Building environment ({sim_name}): {cfg.n_obstacles} obstacle(s), '
           f'wall_thickness={cfg.wall_thickness}, seed={cfg.seed}')
@@ -303,16 +300,9 @@ def main(cfg: DictConfig) -> None:
             seed=cfg.seed,
             verify_threshold=cfg.verify_threshold,
         )
-        plan = planner.plan(initial_state, verbose=True,
-                            visualize_search=cfg.visualize_search,
-                            pause_each_iter=cfg.pause_search)
+        plan = planner.plan(initial_state, verbose=True)
 
     print(f'\nPlanning took {time.time() - t0:.1f}s')
-
-    if cfg.visualize:
-        import viz
-        viz.plot_rrt_tree(planner) if cfg.planner.name == 'rrt' else viz.plot_mcts_tree(planner)
-        viz.show()
 
     if not plan:
         print('No plan found.')
@@ -327,12 +317,10 @@ def main(cfg: DictConfig) -> None:
         save_solution(cfg.save, plan, initial_state, cfg, env)
 
     # ---- replay ----
-    if not cfg.no_replay:
+    if viewer_mode != 'headless':
         if sim_name == 'isaaclab':
             env.replay(plan, initial_state)
         else:
-            # Genesis/IsaacGym: relaunch in a clean subprocess so the simulator
-            # can reinitialize its context with the viewer open.
             _launch_replay(plan, initial_state, cfg)
 
 

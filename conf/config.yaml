@@ -27,10 +27,6 @@ seed: null
 verify_threshold: 0.75   # fraction of envs that must succeed to accept a plan
 min_verify_envs: 16      # minimum envs allocated per plan during multi-plan verification
 viewer: always        # headless | replay | verify | always
-no_replay: false
-visualize: false
-visualize_search: false
-pause_search: false
 save: null
 replay_file: null   # internal: set by subprocess replay launch
 

@@ -323,35 +323,14 @@ class RRTPusher(_PlannerBase):
         self.best_node: RRTNode | None = None
 
     def plan(self, initial_state: dict | None = None,
-             verbose: bool = True,
-             visualize_search: bool = False,
-             pause_each_iter: bool = False) -> list[dict] | None:
+             verbose: bool = True) -> list[dict] | None:
         """
         Run RRT and return the action sequence to the goal, or None if not found.
 
         Handles both single-env (n_envs=1) and parallel (n_envs>1) modes:
-        - Single mode: expands one node per iteration, supports visualization
-        - Parallel mode: expands batch_size nodes per iteration, skips visualization
-
-        Returns list of action dicts: [{'push_pos', 'push_dir', 'obj_idx'}, ...]
-
-        Parameters
-        ----------
-        visualize_search : bool
-            If True and the env has a viewer open, draw the current
-            branch being explored in the Genesis viewer using debug draw tools.
-            Yellow lines/spheres = established path to expand_node.
-            Green sphere/line   = newly explored node.
-        pause_each_iter : bool
-            If True, pause for Enter after drawing each branch (single mode only).
+        - Single mode: expands one node per iteration
+        - Parallel mode: expands batch_size nodes per iteration
         """
-        if pause_each_iter:
-            visualize_search = True
-
-        if self.batch_size > 1 and (visualize_search or pause_each_iter):
-            if verbose:
-                print('  [RRT] visualize_search/pause_each_iter ignored in parallel mode.')
-
         if initial_state is None:
             initial_state = self.env.get_state(0)
 
@@ -359,7 +338,7 @@ class RRTPusher(_PlannerBase):
         tree: list[RRTNode] = [root]
         best_node = root
         best_reward = self.env._compute_reward(initial_state)
-        draw = visualize_search and self.env.show_viewer and self.batch_size == 1
+        draw = False
 
         t0 = time.time()
         for i in range(self.max_iter):
@@ -380,9 +359,6 @@ class RRTPusher(_PlannerBase):
             # --- draw current branch before push (single-env with viewer only) ---
             if draw:
                 self._draw_branch(expand_nodes[0])
-                if pause_each_iter:
-                    input(f'  iter {i+1}: depth={expand_nodes[0].depth} '
-                          f'best={best_reward:.3f}  [Enter to push]')
 
             # --- sample one action per node and batch-evaluate ---
             actions = [_sample_action(n.state, self.env, target_prob=self.target_prob, bias_toward_exit=True)
