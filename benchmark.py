@@ -244,15 +244,18 @@ def main(cfg: DictConfig) -> None:
     # enable_cameras loads omni.replicator so record_replay() can capture frames.
     # Both env vars must be set before _build_env() imports the module.
     if cfg.simulator.name == 'isaaclab':
-        if not cfg.show_viewer:
+        if cfg.viewer == 'headless':
             os.environ['ISAACLAB_HEADLESS'] = '1'
         if cfg.record_video:
             os.environ['ISAACLAB_ENABLE_CAMERAS'] = '1'
 
+    viewer_mode = cfg.viewer
+    show_viewer = viewer_mode == 'always'
     print(f'Building environment ({cfg.simulator.name}): '
           f'{cfg.n_obstacles} obstacle(s), parallel_envs={cfg.parallel_envs}')
     from simulators import build_env
-    env = build_env(cfg, n_envs=cfg.parallel_envs, show_viewer=cfg.show_viewer)
+    env = build_env(cfg, n_envs=cfg.parallel_envs, show_viewer=show_viewer,
+                    viewer_mode=viewer_mode)
 
     # Init wandb after the simulator — Isaac Sim's AppLauncher does process-level
     # setup (signal handlers, CUDA contexts) that can corrupt wandb's upload thread

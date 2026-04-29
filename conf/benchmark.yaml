@@ -13,7 +13,7 @@ n_runs: 20
 base_seed: 0          # run i uses seed = base_seed + i
 n_z_levels: 1
 
-show_viewer: false
+viewer: headless
 
 # Video (IsaacLab only)
 record_video: true

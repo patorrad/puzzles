@@ -142,7 +142,8 @@ class BinEnvIsaacLab(SimulatorEnv):
                  velocity_iterations: int = 1,
                  debug: bool = False,
                  target_z_level: int | None = None,
-                 force_obstacle_on_target: bool = False):
+                 force_obstacle_on_target: bool = False,
+                 viewer_mode: str = 'replay'):
         if not ISAACLAB_AVAILABLE:
             raise ImportError(
                 "isaaclab (or omni.isaac.lab) is not installed. "
@@ -159,6 +160,7 @@ class BinEnvIsaacLab(SimulatorEnv):
             bin_size=bin_size, bin_size_factor=bin_size_factor,
             debug=debug, target_z_level=target_z_level,
             force_obstacle_on_target=force_obstacle_on_target,
+            viewer_mode=viewer_mode,
         )
 
         self.force_threshold = force_threshold
@@ -989,7 +991,7 @@ class BinEnvIsaacLab(SimulatorEnv):
         self.sim.set_camera_view(eye=np.array(eye), target=np.array(target))
 
         self._set_state(initial_state, 0)
-        self._force_render = True
+        self._force_render = self.viewer_mode != 'headless'
         for _ in range(5):
             self._step_sim()
 

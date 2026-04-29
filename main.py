@@ -17,7 +17,7 @@ python main.py n_obstacles=3 wall_thickness=0.1 seed=42
 python main.py parallel_envs=8
 
 # Show viewer during planning:
-python main.py show_during_planning=true
+python main.py viewer=always
 
 # Full example:
 python main.py simulator=isaaclab planner=mcts n_obstacles=2 wall_thickness=0.15
@@ -261,16 +261,20 @@ def main(cfg: DictConfig) -> None:
     from planner import RRTPusher, MCTSPusher
 
     sim_name = cfg.simulator.name
+    viewer_mode = cfg.viewer  # 'headless' | 'replay' | 'verify' | 'always'
 
-    # For isaaclab, viewer is toggled per-step; other simulators need it open upfront
+    if sim_name == 'isaaclab' and viewer_mode == 'headless':
+        os.environ['ISAACLAB_HEADLESS'] = '1'
+
     if sim_name == 'isaaclab':
-        show_viewer = cfg.show_during_planning
+        show_viewer = viewer_mode == 'always'
     else:
-        show_viewer = cfg.show_viewer or cfg.show_during_planning or cfg.visualize_search or cfg.pause_search
+        show_viewer = viewer_mode == 'always' or cfg.visualize_search or cfg.pause_search
 
     print(f'Building environment ({sim_name}): {cfg.n_obstacles} obstacle(s), '
           f'wall_thickness={cfg.wall_thickness}, seed={cfg.seed}')
-    env = build_env(cfg, n_envs=cfg.parallel_envs, show_viewer=show_viewer)
+    env = build_env(cfg, n_envs=cfg.parallel_envs, show_viewer=show_viewer,
+                    viewer_mode=viewer_mode)
     initial_state = env.get_state(0)
 
     print(f'Target start: {torch.round(initial_state["target_pos"].cpu(), decimals=3)}')
