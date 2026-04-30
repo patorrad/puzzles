@@ -1,0 +1,10 @@
+defaults:
+  - config
+  - override scenario: stacked_middle_target   # optional: pass scenario=<name> to use a preset environment
+  - _self_
+
+# Environment
+
+# Runtime
+visualize: true
+visualize_search: true

@@ -1,0 +1,12 @@
+n_obstacles: 2
+
+# Explicit initial state — bypasses random_initial_state().
+# Coordinates in metres; quats are [w, x, y, z].
+initial_state:
+  target_pos: [0.10, 0.22, 0.04]
+  target_quat: [1.0, 0.0, 0.0, 0.0]
+  obstacles:
+    - pos: [0.15, 0.10, 0.04]
+      quat: [1.0, 0.0, 0.0, 0.0]
+    - pos: [0.08, 0.06, 0.04]
+      quat: [1.0, 0.0, 0.0, 0.0]

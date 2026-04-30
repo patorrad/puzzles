@@ -21,6 +21,12 @@ python main.py viewer=always
 
 # Full example:
 python main.py simulator=isaaclab planner=mcts n_obstacles=2 wall_thickness=0.15
+
+# Run on a fixed preset environment (poses defined in conf/scenario/example.yaml):
+python main.py scenario=example
+
+# Preset + override simulator/planner:
+python main.py scenario=example simulator=isaaclab planner=rrt
 """
 
 import os
@@ -272,7 +278,20 @@ def main(cfg: DictConfig) -> None:
           f'wall_thickness={cfg.wall_thickness}, seed={cfg.seed}')
     env = build_env(cfg, n_envs=cfg.parallel_envs, show_viewer=show_viewer,
                     viewer_mode=viewer_mode)
-    initial_state = env.get_state(0)
+
+    if cfg.get('scenario') is not None:
+        from omegaconf import OmegaConf
+        sc = cfg.scenario
+        obs_list = OmegaConf.to_container(sc.initial_state.obstacles, resolve=True)
+        initial_state = {
+            'target_pos':    torch.tensor(sc.initial_state.target_pos),
+            'target_quat':   torch.tensor(sc.initial_state.target_quat),
+            'obstacle_pos':  torch.tensor([o['pos']  for o in obs_list]),
+            'obstacle_quat': torch.tensor([o['quat'] for o in obs_list]),
+        }
+        env.set_state(initial_state)
+    else:
+        initial_state = env.get_state(0)
 
     print(f'Target start: {torch.round(initial_state["target_pos"].cpu(), decimals=3)}')
 

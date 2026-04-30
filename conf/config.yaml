@@ -2,12 +2,13 @@ defaults:
   - simulator: isaaclab
   - planner: mcts
   - reward: default
+  - scenario: null   # optional: pass scenario=<name> to use a preset environment
   - _self_
 
 # Environment
 n_obstacles: 2
 bin_size: null             # null = auto-scale with n_obstacles; set a float (e.g. 0.5) for a fixed size
-bin_size_factor: 0.9      # auto bin_size = (n_obstacles+1) * OBJ_SIZE * this factor (ignored if bin_size is set)
+bin_size_factor: 3      # auto bin_size = (n_obstacles+1) * OBJ_SIZE * this factor (ignored if bin_size is set)
 stackable: false
 difficult_spawn: false
 debug: true
@@ -15,11 +16,11 @@ friction: 1.0
 n_z_levels: 1
 target_z_level: null  # null = floor; integer forces the target to that z level (0=floor, 1=stacked, ...)
 force_obstacle_on_target: false  # if true, one obstacle is placed on top of the target (requires n_z_levels > target_z_level + 1)
-push_steps: 128
-verify_push_steps: null   # null = same as push_steps; integer = use this for verify + video
+push_steps: 256
+verify_push_steps: 256   # null = same as push_steps; integer = use this for verify + video
 substeps: 4
 wall_thickness: 0.25
-parallel_envs: 8
+parallel_envs: 64
 seed: null
 
 
@@ -29,6 +30,7 @@ min_verify_envs: 16      # minimum envs allocated per plan during multi-plan ver
 viewer: always        # headless | replay | verify | always
 save: null
 replay_file: null   # internal: set by subprocess replay launch
+
 
 hydra:
   run:
