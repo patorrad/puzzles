@@ -266,6 +266,12 @@ def main(cfg: DictConfig) -> None:
 
     from planner import RRTPusher, MCTSPusher
 
+    if cfg.get('debug'):
+        from omegaconf import OmegaConf
+        print('=== Config ===')
+        print(OmegaConf.to_yaml(cfg))
+        print('==============')
+
     sim_name = cfg.simulator.name
     viewer_mode = cfg.viewer  # 'headless' | 'replay' | 'verify' | 'always'
 
@@ -273,6 +279,17 @@ def main(cfg: DictConfig) -> None:
         os.environ['ISAACLAB_HEADLESS'] = '1'
 
     show_viewer = viewer_mode == 'always'
+
+    # Scenario config groups land under cfg.scenario.* (no @package _global_).
+    # Propagate env-relevant keys into root cfg before build_env reads them.
+    if cfg.get('scenario') is not None:
+        from omegaconf import OmegaConf, open_dict
+        sc = cfg.scenario
+        with open_dict(cfg):
+            for key in ('n_obstacles', 'n_z_levels', 'target_z_level',
+                        'stackable', 'difficult_spawn'):
+                if key in sc:
+                    cfg[key] = sc[key]
 
     print(f'Building environment ({sim_name}): {cfg.n_obstacles} obstacle(s), '
           f'wall_thickness={cfg.wall_thickness}, seed={cfg.seed}')
@@ -308,7 +325,8 @@ def main(cfg: DictConfig) -> None:
             seed=cfg.seed,
             verify_threshold=cfg.verify_threshold,
         )
-        plan = planner.plan(initial_state, verbose=True)
+        plan = planner.plan(initial_state, verbose=True,
+                            pause_before_verify=cfg.pause_before_verify)
 
     else:  # rrt
         print(f'\nRunning RRT ({cfg.planner.max_iter} iterations)...')
@@ -319,7 +337,8 @@ def main(cfg: DictConfig) -> None:
             seed=cfg.seed,
             verify_threshold=cfg.verify_threshold,
         )
-        plan = planner.plan(initial_state, verbose=True)
+        plan = planner.plan(initial_state, verbose=True,
+                            pause_before_verify=cfg.pause_before_verify)
 
     print(f'\nPlanning took {time.time() - t0:.1f}s')
 

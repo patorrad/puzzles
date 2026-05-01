@@ -35,11 +35,9 @@ from tqdm import tqdm
 from simulators import SimulatorEnv
 
 
-# Action types and their sampling weights (bias_toward_exit=True)
-# pull_s gets highest weight since it directly moves target to exit
-_ACTION_TYPES  = ['push_n', 'pull_s', 'push_e', 'push_w']
-_WEIGHTS_BIASED = torch.tensor([0.45, 0.45, 0.05, 0.05])
-_WEIGHTS_FLAT   = torch.tensor([0.25, 0.25, 0.25, 0.25])
+# Action types and their sampling weights
+_ACTION_TYPES   = ['push_n', 'pull_s', 'push_e', 'push_w']
+_WEIGHTS_DEFAULT = torch.tensor([0.25, 0.25, 0.25, 0.25])
 
 def _hash_action(action: dict) -> tuple:
     return action['action_type'], action['obj_idx'], tuple(action['push_pos'].tolist()), action['push_z']
@@ -47,7 +45,9 @@ def _hash_action(action: dict) -> tuple:
 
 def _sample_action(state: dict, env: SimulatorEnv,
                    target_prob: float = 0.6,
-                   bias_toward_exit: bool = True, recurse_depth = 0, max_recurse_depth = 10, sampled_actions = {}) -> dict:
+                   action_weights: torch.Tensor | None = None,
+                   recurse_depth: int = 0, max_recurse_depth: int = 10,
+                   sampled_actions: dict = {}) -> dict:
     """Sample a random action from the discrete action space.
 
     Returns a dict with keys:
@@ -56,8 +56,6 @@ def _sample_action(state: dict, env: SimulatorEnv,
       push_pos    : (2,)  – xy position of chosen object
       push_z      : float – discrete z level from env.z_levels
     """
-
-
     # Build (N+1, 3) position array: [target, obs0, obs1, ...]
     all_pos_3d = torch.stack([
         state['target_pos'][:3],
@@ -75,19 +73,20 @@ def _sample_action(state: dict, env: SimulatorEnv,
 
     push_pos = all_pos_3d[obj_idx, :2]
 
-    # Discrete z level
-    z_idx  = torch.randint(len(env.z_levels), (1,)).item()
-    push_z = env.z_levels[z_idx]
+    # Snap z to the selected object's actual height
+    obj_z  = float(all_pos_3d[obj_idx, 2])
+    push_z = min(env.z_levels, key=lambda z: abs(z - obj_z))
 
     # Sample action type
-    weights = _WEIGHTS_BIASED if bias_toward_exit else _WEIGHTS_FLAT
+    weights = action_weights if action_weights is not None else _WEIGHTS_DEFAULT
     atype   = _ACTION_TYPES[torch.multinomial(weights, 1).item()]
-    
+
     action = {'action_type': atype, 'obj_idx': obj_idx,
-            'push_pos': push_pos, 'push_z': push_z}
+              'push_pos': push_pos, 'push_z': push_z}
 
     if recurse_depth < max_recurse_depth and _hash_action(action) in sampled_actions:
-        return _sample_action(state, env, target_prob, bias_toward_exit, recurse_depth + 1, max_recurse_depth, sampled_actions)
+        return _sample_action(state, env, target_prob, action_weights,
+                              recurse_depth + 1, max_recurse_depth, sampled_actions)
     else:
         return action
 
@@ -236,28 +235,33 @@ class _PlannerBase:
     @classmethod
     def from_cfg(cls, env: SimulatorEnv, cfg, seed: int) -> '_PlannerBase':
         """Instantiate the correct planner from a Hydra config."""
+        aw = cfg.planner.get('action_weights', None)
         if cfg.planner.name == 'mcts':
             return MCTSPusher(
                 env=env,
                 n_simulations=cfg.planner.n_simulations,
                 rollout_depth=cfg.planner.rollout_depth,
                 max_depth=cfg.planner.max_depth,
+                c_ucb=cfg.planner.c_ucb,
                 target_prob=cfg.planner.target_prob,
                 seed=seed,
                 verify_threshold=cfg.verify_threshold,
                 min_verify_envs=cfg.min_verify_envs,
                 verify_push_steps=cfg.get('verify_push_steps', None),
+                action_weights=list(aw) if aw is not None else None,
             )
         else:
             return RRTPusher(
                 env=env,
                 max_iter=cfg.planner.max_iter,
                 max_depth=cfg.planner.max_depth,
+                goal_bias=cfg.planner.goal_bias,
                 target_prob=cfg.planner.target_prob,
                 seed=seed,
                 verify_threshold=cfg.verify_threshold,
                 min_verify_envs=cfg.min_verify_envs,
                 verify_push_steps=cfg.get('verify_push_steps', None),
+                action_weights=list(aw) if aw is not None else None,
             )
 
     def verify(self, plan: list[dict], initial_state: dict,
@@ -313,17 +317,20 @@ class RRTPusher(_PlannerBase):
     def __init__(self, env: SimulatorEnv, max_iter: int = 200, max_depth: int = 15,
                  goal_bias: float = 0.3, target_prob: float = 0.6, seed: int | None = 42,
                  verify_threshold: float = 0.75, min_verify_envs: int = 16,
-                 verify_push_steps: int | None = None):
+                 verify_push_steps: int | None = None,
+                 action_weights: list[float] | None = None):
         super().__init__(env, verify_threshold, min_verify_envs, seed, verify_push_steps)
         self.max_iter = max_iter
         self.max_depth = max_depth
         self.goal_bias = goal_bias
         self.target_prob = target_prob
+        self.action_weights = torch.tensor(action_weights) if action_weights is not None else None
         self.tree: list[RRTNode] = []   # populated after plan()
         self.best_node: RRTNode | None = None
 
     def plan(self, initial_state: dict | None = None,
-             verbose: bool = True) -> list[dict] | None:
+             verbose: bool = True,
+             pause_before_verify: bool = False) -> list[dict] | None:
         """
         Run RRT and return the action sequence to the goal, or None if not found.
 
@@ -348,7 +355,7 @@ class RRTPusher(_PlannerBase):
 
             expand_nodes = []
             for _ in range(self.batch_size):
-                if torch.rand(1).item() < 0.3:
+                if torch.rand(1).item() < self.goal_bias:
                     expand_nodes.append(best_node)
                 else:
                     expand_nodes.append(tree[torch.multinomial(weights, 1).item()])
@@ -361,7 +368,8 @@ class RRTPusher(_PlannerBase):
                 self._draw_branch(expand_nodes[0])
 
             # --- sample one action per node and batch-evaluate ---
-            actions = [_sample_action(n.state, self.env, target_prob=self.target_prob, bias_toward_exit=True)
+            actions = [_sample_action(n.state, self.env, target_prob=self.target_prob,
+                                      action_weights=self.action_weights)
                        for n in expand_nodes]
             pairs = list(zip([n.state for n in expand_nodes], actions))
             results = self.env.batch_evaluate(pairs)
@@ -401,6 +409,8 @@ class RRTPusher(_PlannerBase):
                 if verbose:
                     print(f'  Goal reached at iter {i+1}!')
                 path = self._extract_path(goal_node)
+                if pause_before_verify:
+                    input('  [Press Enter to start verification...]')
                 with self.env.push_steps_ctx(self.verify_push_steps):
                     verified, avg_reward = _verify_plan(self.env, path, root.state,
                                                          self.batch_size, verbose)
@@ -575,18 +585,21 @@ class MCTSPusher(_PlannerBase):
                  rollout_depth: int = 5, max_depth: int = 10,
                  c_ucb: float = 1.4, target_prob: float = 0.6, seed: int | None = 42,
                  verify_threshold: float = 0.75, min_verify_envs: int = 16,
-                 verify_push_steps: int | None = None):
+                 verify_push_steps: int | None = None,
+                 action_weights: list[float] | None = None):
         super().__init__(env, verify_threshold, min_verify_envs, seed, verify_push_steps)
         self.n_simulations = n_simulations
         self.rollout_depth = rollout_depth
         self.max_depth = max_depth
         self.c_ucb = c_ucb
         self.target_prob = target_prob
+        self.action_weights = torch.tensor(action_weights) if action_weights is not None else None
         self.root: MCTSNode | None = None    # populated after plan()
         self.best_leaf: MCTSNode | None = None
 
     def plan(self, initial_state: dict | None = None,
-             verbose: bool = True) -> list[dict] | None:
+             verbose: bool = True,
+             pause_before_verify: bool = False) -> list[dict] | None:
         """Run MCTS and return the best action sequence found."""
         if initial_state is None:
             initial_state = self.env.get_state(0)
@@ -639,6 +652,8 @@ class MCTSPusher(_PlannerBase):
                         seen.add(sig)
                         unique.append((path, node))
 
+                if pause_before_verify:
+                    input('  [Press Enter to start verification...]')
                 with self.env.push_steps_ctx(self.verify_push_steps):
                     verify_results = _verify_all_plans(
                         self.env, unique, root.state,
@@ -710,6 +725,7 @@ class MCTSPusher(_PlannerBase):
                 continue
             action = _sample_action(node.state, self.env,
                                     target_prob=self.target_prob,
+                                    action_weights=self.action_weights,
                                     sampled_actions=node.sampled_actions)
             node.sampled_actions[_hash_action(action)] = True
             pairs.append((node.state, action))
@@ -752,7 +768,8 @@ class MCTSPusher(_PlannerBase):
         for step in range(self.rollout_depth):
             if not active:
                 break
-            pairs = [(states[i], _sample_action(states[i], self.env, target_prob=self.target_prob)) for i in active]
+            pairs = [(states[i], _sample_action(states[i], self.env, target_prob=self.target_prob,
+                                                action_weights=self.action_weights)) for i in active]
             results = self.env.batch_evaluate(pairs)
 
             still_active = []

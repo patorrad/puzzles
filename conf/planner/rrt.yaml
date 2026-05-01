@@ -1,4 +1,6 @@
 name: rrt
 max_iter: 150
 max_depth: 12
+goal_bias: 0.3  # probability of re-expanding the current best node instead of sampling by reward weight
 target_prob: 0.6
+action_weights: [0.25, 0.25, 0.25, 0.25]  # push_n, pull_s, push_e, push_w

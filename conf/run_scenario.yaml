@@ -5,6 +5,10 @@ defaults:
 
 # Environment
 
+planner:
+  target_prob: 0.4
+
 # Runtime
-visualize: true
-visualize_search: true
+pause_before_verify: false
+visualize: false
+visualize_search: false
