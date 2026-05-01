@@ -335,6 +335,21 @@ class BinEnvIsaacLab(SimulatorEnv):
             for oi in range(self.n_obstacles)
         ]
 
+        # Visual-only plane marking EXIT_Y — kinematic, collision disabled so
+        # the target can pass through it freely.
+        exit_marker_cfg = sim_utils.CuboidCfg(
+            size=(bw, 0.004, .02),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                kinematic_enabled=True,
+                disable_gravity=True,
+            ),
+            mass_props=sim_utils.MassPropertiesCfg(mass=0.001),
+            collision_props=sim_utils.CollisionPropertiesCfg(
+                collision_enabled=False,
+            ),
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.5, 0.0)),
+        )
+
         # Ground plane (one shared plane under all envs)
         sim_utils.GroundPlaneCfg().func("/World/GroundPlane", sim_utils.GroundPlaneCfg())
 
@@ -352,6 +367,10 @@ class BinEnvIsaacLab(SimulatorEnv):
                              (ox - wt/2, oy + bd/2, BIN_H/2))
             self._spawn_prim(f"{ep}/WallEast",  east_cfg,
                              (ox + bw + wt/2, oy + bd/2, BIN_H/2))
+
+            # Exit boundary marker at EXIT_Y (south of the bin opening)
+            self._spawn_prim(f"{ep}/ExitMarker", exit_marker_cfg,
+                             (ox + bw/2, oy + EXIT_Y, OBJ_H))
 
             # Kinematic pushers (parked outside bin)
             park_w = self._local_to_world(self._park, ei)
