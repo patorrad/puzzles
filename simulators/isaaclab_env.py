@@ -756,30 +756,6 @@ class BinEnvIsaacLab(SimulatorEnv):
     # Batch evaluation (parallel mode)
     # ------------------------------------------------------------------
 
-    def _action_to_stroke(self, action: dict,
-                          approach_dist: float = 0.12,
-                          push_dist: float = 0.25) -> tuple[str, list, list]:
-        """Convert action dict → (pusher_type, start_local_3d, end_local_3d)."""
-        atype = action['action_type']
-        pos   = action['push_pos']
-        z     = action['push_z']
-        if atype == 'push_n':
-            return ('ns',
-                    [pos[0], pos[1] - approach_dist, z],
-                    [pos[0], pos[1] + push_dist,     z])
-        if atype == 'pull_s':
-            return ('ns',
-                    [pos[0], pos[1] + approach_dist,  z],
-                    [pos[0], EXIT_Y  - approach_dist, z])
-        if atype == 'push_e':
-            return ('ew',
-                    [pos[0] - approach_dist, pos[1], z],
-                    [pos[0] + push_dist,     pos[1], z])
-        # push_w
-        return ('ew',
-                [pos[0] + approach_dist, pos[1], z],
-                [pos[0] - push_dist,     pos[1], z])
-
     def _batch_evaluate_impl(self, pairs: list[tuple[dict, dict]]
                             ) -> list[tuple[dict, float, bool]]:
         """
@@ -964,36 +940,10 @@ class BinEnvIsaacLab(SimulatorEnv):
         return any(float(state['obstacle_pos'][i][1]) < EXIT_Y
                    for i in range(self.n_obstacles))
 
-    def _compute_reward(self, state: dict) -> float:
-        cfg = self.reward_cfg
-        r = 0.0
-        if cfg is None or cfg.target_progress.enabled:
-            y = float(state['target_pos'][1])
-            r += float(torch.clamp(torch.tensor((self.bin_d / 2 - y) / (self.bin_d / 2 - EXIT_Y)), 0.0, 2.0))
-        if cfg is None or cfg.obstacle_penalty.enabled:
-            weight = 0.5 if cfg is None else cfg.obstacle_penalty.weight
-            n_dropped = sum(1 for i in range(self.n_obstacles)
-                            if float(state['obstacle_pos'][i][1]) < EXIT_Y)
-            r -= weight * n_dropped
-        if cfg is None or cfg.path_blocker.enabled:
-            weight = 0.5 if cfg is None else cfg.path_blocker.weight
-            scale  = 0.16 if cfg is None else cfg.path_blocker.scale
-            tx = float(state['target_pos'][0])
-            ty = float(state['target_pos'][1])
-            for i in range(self.n_obstacles):
-                oy = float(state['obstacle_pos'][i][1])
-                if 0.0 < oy < ty:
-                    x_dist = abs(float(state['obstacle_pos'][i][0]) - tx)
-                    r -= weight * max(0.0, 1.0 - x_dist / scale)
-        return r
-
     def _is_goal(self, state: dict) -> bool:
         if self._obstacles_dropped(state):
             return False
         return bool(float(state['target_pos'][1]) <= EXIT_Y)
-
-    def is_goal(self, state: dict) -> bool:
-        return self._is_goal(state)
 
     def step_physics(self) -> None:
         self._step_sim(render=False)

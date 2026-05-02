@@ -10,5 +10,3 @@ planner:
 
 # Runtime
 pause_before_verify: false
-visualize: false
-visualize_search: false

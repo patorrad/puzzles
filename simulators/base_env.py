@@ -48,6 +48,7 @@ class SimulatorEnv(ABC):
     """
 
     _OBJ_SIZE = 0.08   # object cube side length (shared across all backends)
+    _EXIT_Y   = -0.05  # target exits when its y < _EXIT_Y
 
     def __init__(self, n_obstacles: int = 2, n_envs: int = 1,
                  show_viewer: bool = False,
@@ -223,6 +224,30 @@ class SimulatorEnv(ABC):
         self.batch_calls = 0
         self.total_pairs = 0
 
+    def _action_to_stroke(self, action: Dict,
+                          approach_dist: float = 0.12,
+                          push_dist: float = 0.25) -> Tuple[str, list, list]:
+        """Convert action dict to (pusher_type, start_3d, end_3d). (Parallel mode only)"""
+        atype = action['action_type']
+        pos   = action['push_pos']
+        z     = action['push_z']
+        if atype == 'push_n':
+            return ('ns',
+                    [pos[0], pos[1] - approach_dist, z],
+                    [pos[0], pos[1] + push_dist,     z])
+        if atype == 'pull_s':
+            return ('ns',
+                    [pos[0], pos[1] + approach_dist,        z],
+                    [pos[0], self._EXIT_Y - approach_dist,  z])
+        if atype == 'push_e':
+            return ('ew',
+                    [pos[0] - approach_dist, pos[1], z],
+                    [pos[0] + push_dist,     pos[1], z])
+        # push_w
+        return ('ew',
+                [pos[0] + approach_dist, pos[1], z],
+                [pos[0] - push_dist,     pos[1], z])
+
     @abstractmethod
     def _batch_evaluate_impl(self, pairs: List[Tuple[Dict, Dict]]) -> List[Tuple[Dict, float, bool]]:
         """Simulator-specific implementation of batch_evaluate."""
@@ -232,10 +257,9 @@ class SimulatorEnv(ABC):
     # Reward / goal (shared interface)
     # ------------------------------------------------------------------
 
-    @abstractmethod
     def _compute_reward(self, state: Dict) -> float:
         """Compute reward from state."""
-        pass
+        return sum(self.compute_reward_components(state).values())
 
     @abstractmethod
     def _is_goal(self, state: Dict) -> bool:
@@ -253,7 +277,7 @@ class SimulatorEnv(ABC):
 
     def compute_reward_components(self, state: Dict) -> Dict[str, float]:
         """Return each reward term separately: target_progress, obstacle_penalty, path_blocker."""
-        EXIT_Y = -0.05
+        EXIT_Y = self._EXIT_Y
         cfg = self.reward_cfg
 
         target_progress = 0.0
@@ -286,9 +310,10 @@ class SimulatorEnv(ABC):
             'path_blocker': path_blocker,
         }
 
+    @abstractmethod
     def step_physics(self) -> None:
-        """Advance physics one tick with no action. Override in each backend."""
-        raise NotImplementedError
+        """Advance physics one tick with no action."""
+        pass
 
     @contextmanager
     def push_steps_ctx(self, steps: Optional[int]):

@@ -11,7 +11,7 @@ bin_size: null             # null = auto-scale with n_obstacles; set a float (e.
 bin_size_factor: 3      # auto bin_size = (n_obstacles+1) * OBJ_SIZE * this factor (ignored if bin_size is set)
 stackable: false
 difficult_spawn: false
-debug: true
+debug: false
 friction: 1.0
 n_z_levels: 1
 target_z_level: null  # null = floor; integer forces the target to that z level (0=floor, 1=stacked, ...)
