@@ -83,10 +83,10 @@ def env():
     if SIM == 'isaaclab':
         os.environ.setdefault('ISAACLAB_HEADLESS', '1')
         from simulators.isaaclab_env import BinEnvIsaacLab
-        return BinEnvIsaacLab(n_obstacles=2, show_viewer=False, n_envs=1)
+        return BinEnvIsaacLab(n_obstacles=2, show_viewer=False, n_envs=1, bin_size=1.0)
     else:
         from simulators.genesis_env import BinEnv as BinEnvGenesis
-        return BinEnvGenesis(n_obstacles=2, show_viewer=False, n_envs=1)
+        return BinEnvGenesis(n_obstacles=2, show_viewer=False, n_envs=1, bin_size=1.0)
 
 
 # ---------------------------------------------------------------------------
