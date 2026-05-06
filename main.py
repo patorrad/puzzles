@@ -53,19 +53,21 @@ logger = logging.getLogger(__name__)
 def _bin_to_mppi_local(pos: list) -> list:
     """Convert a bin-env position to the MPPI-scene local (env-relative) frame.
 
-    The MCTS planning bin and the MPPI execution scene have swapped X/Y axes
-    and a vertical offset.  Verified against all 4 block initial positions:
+    Verified against all 4 block initial positions in scene.py _BLOCK_SPECS:
 
-        MPPI_X = bin_Y + 0.40   (bin Y → MPPI X, offset centres workspace at X≈0.55)
-        MPPI_Y = bin_X - 0.15   (bin X → MPPI Y, offset centres workspace at Y≈0)
-        MPPI_Z = bin_Z + 0.85   (bin floor at Z=0, table surface at MPPI Z=0.85)
+        MPPI_X = bin_Y + 0.10
+        MPPI_Y = (bin_X - 0.15) + 0.10 * sign(bin_X - 0.15)
+        MPPI_Z = bin_Z + 0.810   (table top at 0.775 + 0.035 = 0.810)
 
-    The 0.85 Z offset = table_top_in_MPPI_local (0.80 + 0.05 half-thickness).
-    The X/Y offsets match the workspace placement defined in
-    examples/ur16e_reach_stand_blocks/scene.py.
+    The Y formula expands each block's lateral offset from the bin centre (0.15)
+    by an extra 0.10 m — matching the physical block placement in the MPPI scene
+    (see examples/ur16e_reach_stand_blocks/scene.py _BLOCK_SPECS).
     """
     x, y, z = pos
-    return [y + 0.40, x - 0.15, z + 0.85]
+    mppi_x = y + 0.10
+    mppi_y = (x - 0.15) + 0.10 * (1.0 if x >= 0.15 else -1.0)
+    mppi_z = z + 0.810
+    return [mppi_x, mppi_y, mppi_z]
 
 
 def _simulate_plan_steps(env, plan: list[dict], initial_state: dict) -> list[dict]:
