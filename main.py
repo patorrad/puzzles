@@ -29,6 +29,7 @@ python main.py scenario=example
 python main.py scenario=example simulator=isaaclab planner=rrt
 """
 
+import logging
 import os
 import sys
 import json
@@ -41,6 +42,8 @@ import hydra
 from omegaconf import DictConfig
 
 from simulators import build_env
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -158,7 +161,7 @@ def save_solution(path: str, plan: list[dict], initial_state: dict,
 
     with open(path, 'w') as f:
         json.dump(data, f, indent=2)
-    print(f'Solution saved to {path}')
+    logger.info('Solution saved to %s', path)
 
 
 
@@ -184,8 +187,9 @@ def _do_replay(cfg: DictConfig):
     done = False
     for step_i, action in enumerate(plan):
         atype = action['action_type']
-        print(f'  Step {step_i+1}/{len(plan)}: [{atype}] obj {action["obj_idx"]} '
-              f'pos {torch.round(action["push_pos"], decimals=3)} z={action["push_z"]:.3f}')
+        logger.info('  Step %d/%d: [%s] obj %s pos %s z=%.3f',
+                    step_i + 1, len(plan), atype, action["obj_idx"],
+                    torch.round(action["push_pos"], decimals=3), action["push_z"])
         if atype == 'push_n':
             _, reward, done = env.execute_ns_push(action['push_pos'], action['push_z'])
         elif atype == 'pull_s':
@@ -194,13 +198,13 @@ def _do_replay(cfg: DictConfig):
             _, reward, done = env.execute_ew_push(action['push_pos'], action['push_z'], direction=+1)
         else:
             _, reward, done = env.execute_ew_push(action['push_pos'], action['push_z'], direction=-1)
-        print(f'    -> reward={reward:.3f}, done={done}')
+        logger.info('    -> reward=%.3f, done=%s', reward, done)
         if done:
-            print('  Target escaped the bin!')
+            logger.info('  Target escaped the bin!')
             break
 
     if not done:
-        print('  Plan executed (target may not have fully escaped).')
+        logger.info('  Plan executed (target may not have fully escaped).')
     if env.show_viewer:
         input('Press Enter to close viewer...')
 
@@ -248,7 +252,7 @@ def _launch_replay(plan, initial_state, cfg: DictConfig):
     if cfg.stackable:
         cmd.append('stackable=true')
 
-    print(f'\nLaunching replay subprocess (plan saved to {path})...')
+    logger.info('Launching replay subprocess (plan saved to %s)...', path)
     subprocess.run(cmd)
     os.unlink(path)
 
@@ -259,6 +263,8 @@ def _launch_replay(plan, initial_state, cfg: DictConfig):
 
 @hydra.main(version_base=None, config_path="conf", config_name="config")
 def main(cfg: DictConfig) -> None:
+    logging.basicConfig(level=logging.INFO, format='%(levelname)s %(name)s: %(message)s')
+
     # Replay mode: invoked by _launch_replay() in a clean process
     if cfg.replay_file is not None:
         _do_replay(cfg)
@@ -268,9 +274,7 @@ def main(cfg: DictConfig) -> None:
 
     if cfg.get('debug'):
         from omegaconf import OmegaConf
-        print('=== Config ===')
-        print(OmegaConf.to_yaml(cfg))
-        print('==============')
+        logger.debug('Config:\n%s', OmegaConf.to_yaml(cfg))
 
     sim_name = cfg.simulator.name
     viewer_mode = cfg.viewer  # 'headless' | 'replay' | 'verify' | 'always'
@@ -291,8 +295,8 @@ def main(cfg: DictConfig) -> None:
                 if key in sc:
                     cfg[key] = sc[key]
 
-    print(f'Building environment ({sim_name}): {cfg.n_obstacles} obstacle(s), '
-          f'wall_thickness={cfg.wall_thickness}, seed={cfg.seed}')
+    logger.info('Building environment (%s): %d obstacle(s), wall_thickness=%s, seed=%s',
+                sim_name, cfg.n_obstacles, cfg.wall_thickness, cfg.seed)
     env = build_env(cfg, n_envs=cfg.parallel_envs, show_viewer=show_viewer,
                     viewer_mode=viewer_mode)
 
@@ -310,13 +314,13 @@ def main(cfg: DictConfig) -> None:
     else:
         initial_state = env.get_state(0)
 
-    print(f'Target start: {torch.round(initial_state["target_pos"].cpu(), decimals=3)}')
+    logger.info('Target start: %s', torch.round(initial_state["target_pos"].cpu(), decimals=3))
 
     # ---- run planner ----
     t0 = time.time()
 
     if cfg.planner.name == 'mcts':
-        print(f'\nRunning MCTS ({cfg.planner.n_simulations} simulations)...')
+        logger.info('Running MCTS (%d simulations)...', cfg.planner.n_simulations)
         planner = MCTSPusher(
             env=env,
             n_simulations=cfg.planner.n_simulations,
@@ -329,7 +333,7 @@ def main(cfg: DictConfig) -> None:
                             pause_before_verify=cfg.pause_before_verify)
 
     else:  # rrt
-        print(f'\nRunning RRT ({cfg.planner.max_iter} iterations)...')
+        logger.info('Running RRT (%d iterations)...', cfg.planner.max_iter)
         planner = RRTPusher(
             env=env,
             max_iter=cfg.planner.max_iter,
@@ -340,16 +344,17 @@ def main(cfg: DictConfig) -> None:
         plan = planner.plan(initial_state, verbose=True,
                             pause_before_verify=cfg.pause_before_verify)
 
-    print(f'\nPlanning took {time.time() - t0:.1f}s')
+    logger.info('Planning took %.1fs', time.time() - t0)
 
     if not plan:
-        print('No plan found.')
+        logger.info('No plan found.')
         return
 
-    print(f'Plan found: {len(plan)} actions')
+    logger.info('Plan found: %d actions', len(plan))
     for i, a in enumerate(plan):
-        print(f'  {i+1}. [{a["action_type"]}] obj={a["obj_idx"]} '
-              f'pos={torch.round(a["push_pos"], decimals=3)} z={a["push_z"]:.3f}')
+        logger.info('  %d. [%s] obj=%s pos=%s z=%.3f',
+                    i + 1, a["action_type"], a["obj_idx"],
+                    torch.round(a["push_pos"], decimals=3), a["push_z"])
 
     if cfg.save:
         save_solution(cfg.save, plan, initial_state, cfg, env)

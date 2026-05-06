@@ -29,12 +29,15 @@ Quaternion convention: (w, x, y, z) — matches Genesis.
 """
 
 import colorsys
+import logging
 import time
 import numpy as np
 import torch
 from typing import List, Optional
 from tqdm import tqdm
 from .base_env import SimulatorEnv
+
+logger = logging.getLogger(__name__)
 
 
 def _obstacle_color(i: int, n: int) -> tuple:
@@ -231,7 +234,7 @@ class BinEnvIsaacLab(SimulatorEnv):
             ),
         )
         self.sim = SimulationContext(sim_cfg)
-        print(f"[IsaacLab] simulation device: {self.device}")
+        logger.info('simulation device: %s', self.device)
         if not _headless:
             ox = self.env_origins[0, 0].item()
             oy = self.env_origins[0, 1].item()
@@ -884,12 +887,14 @@ class BinEnvIsaacLab(SimulatorEnv):
         self.force_trace = torch.stack(_force_buf).cpu().tolist()
         if self.debug:
             n_steps = len(self.force_trace)
-            print(f'[perf] push {n_steps} steps × {k} envs | '
-                  f'loop={_t_loop*1000:.1f}ms  '
-                  f'write={_t_write*1000:.1f}ms  '
-                  f'step={_t_step*1000:.1f}ms (sim={self._dbg_t_sim*1000:.1f}ms '
-                  f'sensors={self._dbg_t_sensors*1000:.1f}ms)  '
-                  f'total={(_t_loop+_t_write+_t_step)*1000:.1f}ms')
+            logger.debug(
+                'push %d steps × %d envs | loop=%.1fms  write=%.1fms  '
+                'step=%.1fms (sim=%.1fms sensors=%.1fms)  total=%.1fms',
+                n_steps, k,
+                _t_loop * 1000, _t_write * 1000, _t_step * 1000,
+                self._dbg_t_sim * 1000, self._dbg_t_sensors * 1000,
+                (_t_loop + _t_write + _t_step) * 1000,
+            )
 
         # 4. Park all pushers and settle
         for env_idx in range(k):
@@ -944,19 +949,18 @@ class BinEnvIsaacLab(SimulatorEnv):
         done  = False
         for step_i, action in enumerate(plan):
             atype = action['action_type']
-            print(f'  Step {step_i + 1}/{len(plan)}: [{atype}] '
-                  f'obj={action["obj_idx"]} '
-                  f'pos={torch.round(action["push_pos"], decimals=3)} '
-                  f'z={action["push_z"]:.3f}', end='', flush=True)
+            logger.info('  Step %d/%d: [%s] obj=%s pos=%s z=%.3f',
+                        step_i + 1, len(plan), atype, action["obj_idx"],
+                        torch.round(action["push_pos"], decimals=3), action["push_z"])
             (state, reward, done), = self.batch_evaluate([(state, action)])
-            print(f'  -> reward={reward:.3f}, done={done}')
+            logger.info('  -> reward=%.3f, done=%s', reward, done)
             if done:
-                print('  Target escaped the bin!')
+                logger.info('  Target escaped the bin!')
                 break
 
         self._force_render = False
         if not done:
-            print('  Plan executed (target may not have fully escaped).')
+            logger.info('  Plan executed (target may not have fully escaped).')
         input('Press Enter to close...')
 
     def record_replay(
@@ -1010,10 +1014,10 @@ class BinEnvIsaacLab(SimulatorEnv):
         render_product.destroy()
 
         if not frames:
-            print('  [record_replay] Warning: no frames captured, skipping video write.')
+            logger.warning('record_replay: no frames captured, skipping video write.')
             return None
 
-        print(f'  [record_replay] Captured {len(frames)} frames → {video_path}')
+        logger.info('record_replay: captured %d frames → %s', len(frames), video_path)
         imageio.mimwrite(video_path, frames, fps=fps, codec='libx264',
                          quality=8, macro_block_size=1)
         return video_path

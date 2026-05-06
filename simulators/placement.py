@@ -6,8 +6,11 @@ is not duplicated across simulator envs. Also provides make_state() for
 constructing test states from simple (x, y) coordinates.
 """
 
+import logging
 import torch
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 BIN_W    = 1.0
 BIN_D    = 1.0
@@ -210,14 +213,14 @@ def random_initial_state(
             return state
         pb = _path_blocker_value(state, n_obstacles)
         if debug:
-            print(f'  [placement] attempt {attempt + 1}/{attempts}: path_blocker={pb:.4f}')
+            logger.debug('attempt %d/%d: path_blocker=%.4f', attempt + 1, attempts, pb)
         if pb < 0.0:
             if debug:
-                print(f'  [placement] success: found blocking obstacle on attempt {attempt + 1}')
+                logger.debug('success: found blocking obstacle on attempt %d', attempt + 1)
             return state
 
     if debug:
-        print(f'  [placement] warning: no blocking obstacle found after {attempts} attempts, using last state')
+        logger.warning('no blocking obstacle found after %d attempts, using last state', attempts)
     return state
 
 
