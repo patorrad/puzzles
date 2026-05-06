@@ -241,8 +241,6 @@ class BinEnvIsaacLab(SimulatorEnv):
                 eye=np.array(eye),
                 target=np.array(target),
             )
-        if self.show_viewer:
-            self._start_render_toggle_thread()
 
     # ------------------------------------------------------------------
     # Scene construction
@@ -484,30 +482,6 @@ class BinEnvIsaacLab(SimulatorEnv):
         dt = self.sim.get_physics_dt()
         for sensor in self._active_push_sensors:
             sensor.update(dt)
-
-    def _start_render_toggle_thread(self):
-        """Spawn a daemon thread that reads raw input from /dev/tty and toggles rendering on 'f'."""
-        import threading, tty, termios
-
-        def _reader():
-            try:
-                with open('/dev/tty', 'rb', buffering=0) as tty_fh:
-                    fd = tty_fh.fileno()
-                    old = termios.tcgetattr(fd)
-                    try:
-                        tty.setcbreak(fd)
-                        print('[IsaacLab] Press f to toggle rendering', flush=True)
-                        while True:
-                            ch = tty_fh.read(1)
-                            if ch.lower() == b'f':
-                                self.rendering_enabled = not self.rendering_enabled
-                                print(f'\r[IsaacLab] Rendering {"ON" if self.rendering_enabled else "OFF"}', flush=True)
-                    finally:
-                        termios.tcsetattr(fd, termios.TCSADRAIN, old)
-            except Exception as e:
-                print(f'[IsaacLab] Render toggle unavailable: {e}', flush=True)
-
-        threading.Thread(target=_reader, daemon=True).start()
 
     def _step_sim(self, render: bool = False):
         """Advance one physics step (all envs simultaneously) and refresh."""
