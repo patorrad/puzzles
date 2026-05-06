@@ -16,9 +16,11 @@ Always use the conda environment `genesis_mpc` for genesis runs, or `isaaclab_mp
 
 Configuration is managed via [Hydra](https://hydra.cc/) with config files in `conf/`. The entry point is `main.py`.
 
+**Default focus: IsaacLab simulator + MCTS planner.** Unless otherwise specified, assume `simulator=isaaclab` and `planner=mcts` for all suggestions, examples, and code changes.
+
 ```bash
-# Default: MCTS with Genesis, 2 obstacles, 8 parallel envs
-python main.py
+# Default: MCTS with IsaacLab, 2 obstacles, 8 parallel envs
+python main.py simulator=isaaclab
 
 # Switch simulator or planner
 python main.py simulator=isaaclab
@@ -66,7 +68,7 @@ IsaacLab runs support video recording via `env.record_replay()`.
 - `batch_evaluate(pairs)` — parallel evaluation of `(state, action)` pairs; returns `(new_state, reward, done)` per pair
 - `_compute_reward`, `_is_goal`, `_obstacles_dropped` — reward/termination logic
 
-Simulator backends: `BinEnvGenesis` (default), `BinEnvIsaacGym`, `BinEnvIsaacLab`. Imports are lazy in `simulators/__init__.py` so missing dependencies don't cause import errors.
+Simulator backends: `BinEnvIsaacLab` (default focus), `BinEnvGenesis`, `BinEnvIsaacGym`. Imports are lazy in `simulators/__init__.py` so missing dependencies don't cause import errors.
 
 `simulators/placement.py` — Shared, simulator-agnostic initial-state generation (pure PyTorch/NumPy). `random_initial_state()` places objects with proximity-based column stacking: if a sampled position lands within `OBJ_SIZE × 1.05` of an existing column it stacks on that column instead of retrying. `target_z_level` controls target height (`null` = random from occupied levels, `0` = floor, `1+` = stacked on an obstacle column).
 
