@@ -34,8 +34,6 @@ SIM = os.environ.get('SIM', 'genesis')
 # Physics constants (must match genesis_env.py)
 BIN_D    = 1.0
 EXIT_Y   = -0.05
-OBJ_SIZE = 0.08
-
 SETTLE_STEPS = 20  # steps with no actions before reading back state
 
 # ---------------------------------------------------------------------------

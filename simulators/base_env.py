@@ -47,7 +47,6 @@ class SimulatorEnv(ABC):
         Physics substeps per scene.step()
     """
 
-    _OBJ_SIZE = 0.08   # object cube side length (shared across all backends)
     _EXIT_Y   = -0.05  # target exits when its y < _EXIT_Y
 
     def __init__(self, n_obstacles: int = 2, n_envs: int = 1,
@@ -61,10 +60,12 @@ class SimulatorEnv(ABC):
                  reward_cfg=None,
                  bin_size: Optional[float] = None,
                  bin_size_factor: float = 0.9,
+                 obj_size: float = 0.05,
                  debug: bool = False,
                  target_z_level: Optional[int] = None,
                  force_obstacle_on_target: bool = False,
                  viewer_mode: str = 'replay'):
+        self._OBJ_SIZE = obj_size
         self.n_obstacles = n_obstacles
         self.n_envs = n_envs
         self.show_viewer = show_viewer

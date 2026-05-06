@@ -11,8 +11,6 @@ from typing import Optional
 
 BIN_W    = 1.0
 BIN_D    = 1.0
-OBJ_SIZE = 0.08
-OBJ_H    = OBJ_SIZE / 2  # 0.04 — resting z-height
 
 
 def _place_objects_once(
@@ -21,12 +19,14 @@ def _place_objects_once(
     difficult_spawn: bool,
     bin_w: float,
     bin_d: float,
+    obj_size: float,
     n_z_levels: int = 1,
     target_z_level: int | None = None,
     force_obstacle_on_target: bool = False,
 ) -> dict:
     """Single placement attempt. Caller is responsible for seeding."""
-    margin   = OBJ_SIZE * 0.7
+    obj_h    = obj_size / 2
+    margin   = obj_size * 0.7
     x_lo, x_hi = margin, bin_w - margin
     y_lo, y_hi = margin, bin_d - margin
 
@@ -58,13 +58,13 @@ def _place_objects_once(
             if eligible:
                 idx = int(torch.randint(len(eligible), (1,)).item())
                 choice_i, (x, y, count) = eligible[idx]
-                positions.append([x, y, OBJ_H + OBJ_SIZE * count])
+                positions.append([x, y, obj_h + obj_size * count])
                 columns[choice_i] = (x, y, count + 1)
                 placed = True
             # Fall through to floor placement if no suitable column exists.
 
         if not placed:
-            sep = OBJ_SIZE * 1.05  # minimum column separation
+            sep = obj_size * 1.05  # minimum column separation
             can_stack = (stackable or n_z_levels > 1) and not is_target
             for _ in range(500):
                 x = torch.empty(1).uniform_(x_lo, x_hi).item()
@@ -82,25 +82,25 @@ def _place_objects_once(
                         choice_i, (cx, cy, count) = min(
                             nearby, key=lambda ic: (x - ic[1][0]) ** 2 + (y - ic[1][1]) ** 2
                         )
-                        positions.append([cx, cy, OBJ_H + OBJ_SIZE * count])
+                        positions.append([cx, cy, obj_h + obj_size * count])
                         columns[choice_i] = (cx, cy, count + 1)
                         placed = True
                         break
 
                 if all(((x - cx) ** 2 + (y - cy) ** 2) ** 0.5 > sep
                        for cx, cy, _ in columns):
-                    positions.append([x, y, OBJ_H])
+                    positions.append([x, y, obj_h])
                     columns.append((x, y, 1))
                     placed = True
                     break
 
             if not placed:
-                positions.append([bin_w / 2, bin_d / 2, OBJ_H])
+                positions.append([bin_w / 2, bin_d / 2, obj_h])
                 columns.append((bin_w / 2, bin_d / 2, 1))
 
     # If the target didn't land at the requested level, swap with an obstacle at that level.
     if n_obstacles > 0 and _target_z is not None and _target_z > 0:
-        target_z_height = OBJ_H + OBJ_SIZE * _target_z
+        target_z_height = obj_h + obj_size * _target_z
         if abs(positions[n_obstacles][2] - target_z_height) > 1e-4:
             for obs_idx in range(n_obstacles):
                 if abs(positions[obs_idx][2] - target_z_height) < 1e-4:
@@ -112,8 +112,8 @@ def _place_objects_once(
     # Force one obstacle directly on top of the target if requested and there is room above it.
     if force_obstacle_on_target and n_obstacles > 0 and _target_z is not None and _target_z + 1 < n_z_levels:
         target_x, target_y = positions[n_obstacles][0], positions[n_obstacles][1]
-        above_z = OBJ_H + OBJ_SIZE * (_target_z + 1)
-        sep = OBJ_SIZE * 1.05
+        above_z = obj_h + obj_size * (_target_z + 1)
+        sep = obj_size * 1.05
         for obs_idx in range(n_obstacles):
             ox, oy = positions[obs_idx][0], positions[obs_idx][1]
             if ((ox - target_x) ** 2 + (oy - target_y) ** 2) ** 0.5 >= sep:
@@ -150,6 +150,7 @@ def _path_blocker_value(state: dict, n_obstacles: int, scale: float = 0.16, weig
 
 def random_initial_state(
     n_obstacles: int,
+    obj_size: float,
     stackable: bool = False,
     difficult_spawn: bool = False,
     seed: Optional[int] = None,
@@ -166,7 +167,7 @@ def random_initial_state(
 
     Replicates the column-based placement algorithm used by the simulator envs:
     - Objects placed randomly in [margin, bin_w-margin] × [margin, bin_d-margin]
-    - Minimum column separation of OBJ_SIZE × 1.05
+    - Minimum column separation of obj_size × 1.05
     - Optional stacking (50% chance per object after the first column exists)
     - difficult_spawn=True: target restricted to y ∈ [bin_d/2, bin_d-margin] AND
       at least one obstacle must be south of the target within the path-blocker
@@ -177,6 +178,8 @@ def random_initial_state(
     Parameters
     ----------
     n_obstacles : int
+    obj_size : float
+        Object cube side length (metres).
     stackable : bool
     difficult_spawn : bool
     seed : int | None
@@ -203,7 +206,8 @@ def random_initial_state(
     attempts = max_attempts if difficult_spawn else 1
     state = None
     for attempt in range(attempts):
-        state = _place_objects_once(n_obstacles, stackable, difficult_spawn, bin_w, bin_d, n_z_levels,
+        state = _place_objects_once(n_obstacles, stackable, difficult_spawn, bin_w, bin_d,
+                                    obj_size, n_z_levels,
                                     target_z_level=target_z_level,
                                     force_obstacle_on_target=force_obstacle_on_target)
         if not difficult_spawn:
@@ -221,26 +225,28 @@ def random_initial_state(
     return state
 
 
-def make_state(target_xy: tuple, obstacle_xys: list) -> dict:
+def make_state(target_xy: tuple, obstacle_xys: list, obj_size: float) -> dict:
     """
-    Build a state dict from (x, y) tuples; z is set to OBJ_H for all objects.
+    Build a state dict from (x, y) tuples; z is set to obj_size/2 for all objects.
 
     Parameters
     ----------
     target_xy : (x, y)
     obstacle_xys : list of (x, y)
+    obj_size : float
 
     Returns
     -------
     State dict compatible with env.set_state() and env._compute_reward()
     """
+    obj_h = obj_size / 2
     tx, ty = target_xy
     n = len(obstacle_xys)
     identity = [1.0, 0.0, 0.0, 0.0]
     return {
-        'target_pos':    torch.tensor([tx, ty, OBJ_H], dtype=torch.float32),
+        'target_pos':    torch.tensor([tx, ty, obj_h], dtype=torch.float32),
         'target_quat':   torch.tensor(identity, dtype=torch.float32),
-        'obstacle_pos':  (torch.tensor([[ox, oy, OBJ_H] for ox, oy in obstacle_xys], dtype=torch.float32)
+        'obstacle_pos':  (torch.tensor([[ox, oy, obj_h] for ox, oy in obstacle_xys], dtype=torch.float32)
                           if n > 0 else torch.zeros(0, 3, dtype=torch.float32)),
         'obstacle_quat': (torch.tensor([identity] * n, dtype=torch.float32)
                           if n > 0 else torch.zeros(0, 4, dtype=torch.float32)),
