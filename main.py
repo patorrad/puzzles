@@ -50,6 +50,24 @@ logger = logging.getLogger(__name__)
 # Replay helpers
 # ---------------------------------------------------------------------------
 
+def _bin_to_mppi_local(pos: list) -> list:
+    """Convert a bin-env position to the MPPI-scene local (env-relative) frame.
+
+    The MCTS planning bin and the MPPI execution scene have swapped X/Y axes
+    and a vertical offset.  Verified against all 4 block initial positions:
+
+        MPPI_X = bin_Y + 0.40   (bin Y → MPPI X, offset centres workspace at X≈0.55)
+        MPPI_Y = bin_X - 0.15   (bin X → MPPI Y, offset centres workspace at Y≈0)
+        MPPI_Z = bin_Z + 0.85   (bin floor at Z=0, table surface at MPPI Z=0.85)
+
+    The 0.85 Z offset = table_top_in_MPPI_local (0.80 + 0.05 half-thickness).
+    The X/Y offsets match the workspace placement defined in
+    examples/ur16e_reach_stand_blocks/scene.py.
+    """
+    x, y, z = pos
+    return [y + 0.40, x - 0.15, z + 0.85]
+
+
 def _simulate_plan_steps(env, plan: list[dict], initial_state: dict) -> list[dict]:
     steps = []
     state = initial_state
@@ -83,13 +101,16 @@ def _simulate_plan_steps(env, plan: list[dict], initial_state: dict) -> list[dic
         steps.append({
             'obj_idx':           obj_idx,
             'obj_name':          obj_name,
-            'start_pos':         start_pos,
+            # Positions are converted from bin-env local to MPPI-scene local frame
+            # via _bin_to_mppi_local() so they match sim.get_object_pos() directly.
+            'coordinate_frame':  'isaaclab_local',
+            'start_pos':         _bin_to_mppi_local(start_pos),
             'start_quat':        start_quat,
-            'end_pos':           end_pos,
+            'end_pos':           _bin_to_mppi_local(end_pos),
             'end_quat':          end_quat,
-            'target_start_pos':  target_start_pos,
+            'target_start_pos':  _bin_to_mppi_local(target_start_pos),
             'target_start_quat': target_start_quat,
-            'target_end_pos':    target_end_pos,
+            'target_end_pos':    _bin_to_mppi_local(target_end_pos),
             'target_end_quat':   target_end_quat,
         })
 
