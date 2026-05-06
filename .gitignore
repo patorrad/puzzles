@@ -38,4 +38,5 @@ runs/
 
 # claude
 .claude
+CLAUDE.md
 __pycache__
