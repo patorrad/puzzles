@@ -51,8 +51,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def _simulate_plan_steps(env, plan: list[dict], initial_state: dict) -> list[dict]:
-    from planner import _execute_action
-
     steps = []
     state = initial_state
     env.set_state(state)
@@ -70,7 +68,7 @@ def _simulate_plan_steps(env, plan: list[dict], initial_state: dict) -> list[dic
         target_start_pos  = state['target_pos'].tolist()
         target_start_quat = state['target_quat'].tolist()
 
-        new_state, _, _ = _execute_action(env, action)
+        (new_state, _, _), = env.batch_evaluate([(state, action)])
         state = new_state
 
         if obj_idx == 0:
@@ -103,7 +101,7 @@ def save_solution(path: str, plan: list[dict], initial_state: dict,
     BIN_W    = env.bin_w
     BIN_D    = env.bin_d
     BIN_H    = 0.5
-    OBJ_SIZE = 0.08
+    OBJ_SIZE = env._OBJ_SIZE
     OBJ_H    = OBJ_SIZE / 2
     EXIT_Y   = -0.05
     PUSHER_T = 0.012
@@ -291,7 +289,8 @@ def main(cfg: DictConfig) -> None:
         sc = cfg.scenario
         with open_dict(cfg):
             for key in ('n_obstacles', 'n_z_levels', 'target_z_level',
-                        'stackable', 'difficult_spawn'):
+                        'stackable', 'difficult_spawn',
+                        'bin_size', 'wall_thickness', 'friction'):
                 if key in sc:
                     cfg[key] = sc[key]
 
@@ -358,6 +357,9 @@ def main(cfg: DictConfig) -> None:
 
     if cfg.save:
         save_solution(cfg.save, plan, initial_state, cfg, env)
+
+    if cfg.mppi_output:
+        save_solution(cfg.mppi_output, plan, initial_state, cfg, env)
 
     # ---- replay ----
     if viewer_mode != 'headless':

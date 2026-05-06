@@ -34,15 +34,9 @@ BIN_D = 1.0   # y extent (depth, from 0 to BIN_D)
 BIN_H = 0.5   # wall height
 WALL_T = 0.05  # wall thickness
 
-OBJ_SIZE = 0.08        # object cube side length
-OBJ_H    = OBJ_SIZE / 2  # object center z when resting on floor
-
 PUSHER_T = 0.012              # thin dimension of each pusher blade
-PUSHER_W = OBJ_SIZE * 0.88   # wide dimension (slightly smaller than objects)
 
 EXIT_Y = -0.05  # target exits when its y < EXIT_Y
-
-_PARK = [BIN_W / 2, -2.0, OBJ_H]  # safe parking position outside the bin
 
 # Actor ordering within each env (must match create_actor call order in _build_scene)
 _IDX_FLOOR    = 0
@@ -88,7 +82,8 @@ class BinEnvIsaacGym(SimulatorEnv):
                  difficult_spawn: bool = False,
                  reward_cfg=None,
                  bin_size: float | None = None,
-                 bin_size_factor: float = 0.9):
+                 bin_size_factor: float = 0.9,
+                 obj_size: float = 0.05):
         if not ISAACGYM_AVAILABLE:
             raise ImportError("isaacgym is not installed. Install it before using BinEnvIsaacGym.")
 
@@ -98,11 +93,15 @@ class BinEnvIsaacGym(SimulatorEnv):
                          n_z_levels=n_z_levels, push_steps=push_steps,
                          substeps=substeps, wall_thickness=wall_thickness,
                          difficult_spawn=difficult_spawn, reward_cfg=reward_cfg,
-                         bin_size=bin_size, bin_size_factor=bin_size_factor)
+                         bin_size=bin_size, bin_size_factor=bin_size_factor,
+                         obj_size=obj_size)
+
+        self._OBJ_H    = self._OBJ_SIZE / 2
+        self._pusher_w = self._OBJ_SIZE * 0.88
 
         _park_y = -(max(self.bin_w, self.bin_d) * 1.5 + 0.1)
-        self._park = [self.bin_w / 2, _park_y, OBJ_H]
-        self.z_levels = [OBJ_H + i * OBJ_SIZE for i in range(n_z_levels)]
+        self._park = [self.bin_w / 2, _park_y, self._OBJ_H]
+        self.z_levels = [self._OBJ_H + i * self._OBJ_SIZE for i in range(n_z_levels)]
 
         # Number of actors per env: floor + 3 walls + 2 pushers + 1 target + n_obstacles
         self.n_actors_per_env = 7 + n_obstacles
@@ -198,10 +197,10 @@ class BinEnvIsaacGym(SimulatorEnv):
         north_wall_asset = gym.create_box_asset(sim, bw + 2*wt, wt, BIN_H, fixed_opts)
         west_wall_asset  = gym.create_box_asset(sim, wt, bd, BIN_H, fixed_opts)
         east_wall_asset  = gym.create_box_asset(sim, wt, bd, BIN_H, fixed_opts)
-        pusher_ns_asset  = gym.create_box_asset(sim, PUSHER_W, PUSHER_T, PUSHER_W, pusher_opts)
-        pusher_ew_asset  = gym.create_box_asset(sim, PUSHER_T, PUSHER_W, PUSHER_W, pusher_opts)
-        target_asset     = gym.create_box_asset(sim, OBJ_SIZE, OBJ_SIZE, OBJ_SIZE, dynamic_opts)
-        obstacle_asset   = gym.create_box_asset(sim, OBJ_SIZE, OBJ_SIZE, OBJ_SIZE, dynamic_opts)
+        pusher_ns_asset  = gym.create_box_asset(sim, self._pusher_w, PUSHER_T, self._pusher_w, pusher_opts)
+        pusher_ew_asset  = gym.create_box_asset(sim, PUSHER_T, self._pusher_w, self._pusher_w, pusher_opts)
+        target_asset     = gym.create_box_asset(sim, self._OBJ_SIZE, self._OBJ_SIZE, self._OBJ_SIZE, dynamic_opts)
+        obstacle_asset   = gym.create_box_asset(sim, self._OBJ_SIZE, self._OBJ_SIZE, self._OBJ_SIZE, dynamic_opts)
 
         n_cols = max(1, int(np.ceil(np.sqrt(self.n_envs))))
         park_y = self._park[1]
@@ -254,14 +253,14 @@ class BinEnvIsaacGym(SimulatorEnv):
 
             # 6: target
             gym.create_actor(env, target_asset,
-                             self._make_pose([bw/2, bd/2, OBJ_H]),
+                             self._make_pose([bw/2, bd/2, self._OBJ_H]),
                              "target", cg, 0)
             self._set_friction(env, _IDX_TARGET, self.friction)
 
             # 7...: obstacles
             for obs_i in range(self.n_obstacles):
                 gym.create_actor(env, obstacle_asset,
-                                 self._make_pose([bw/2, bd/2, OBJ_H]),
+                                 self._make_pose([bw/2, bd/2, self._OBJ_H]),
                                  f"obstacle_{obs_i}", cg, 0)
                 self._set_friction(env, _IDX_OBS_BASE + obs_i, self.friction)
 
@@ -312,7 +311,7 @@ class BinEnvIsaacGym(SimulatorEnv):
     def _place_objects(self):
         """Randomly place objects inside the bin, optionally stacking them."""
         self._refresh()
-        margin = OBJ_SIZE * 0.7
+        margin = self._OBJ_SIZE * 0.7
         x_lo, x_hi = margin, self.bin_w - margin
         y_lo, y_hi = margin, self.bin_d - margin
 
@@ -327,7 +326,7 @@ class BinEnvIsaacGym(SimulatorEnv):
             if self.stackable and columns and torch.rand(1).item() < 0.5:
                 col_i = torch.randint(len(columns), (1,)).item()
                 x, y, count = columns[col_i]
-                self._set_actor_pos(0, local_idx, [x, y, OBJ_H + OBJ_SIZE * count])
+                self._set_actor_pos(0, local_idx, [x, y, self._OBJ_H + self._OBJ_SIZE * count])
                 columns[col_i] = (x, y, count + 1)
                 placed = True
 
@@ -335,9 +334,9 @@ class BinEnvIsaacGym(SimulatorEnv):
                 for _ in range(200):
                     x = torch.empty(1).uniform_(x_lo, x_hi).item()
                     y = torch.empty(1).uniform_(obj_y_lo, y_hi).item()
-                    if all(((x - cx)**2 + (y - cy)**2)**0.5 > OBJ_SIZE * 1.05
+                    if all(((x - cx)**2 + (y - cy)**2)**0.5 > self._OBJ_SIZE * 1.05
                            for cx, cy, _ in columns):
-                        self._set_actor_pos(0, local_idx, [x, y, OBJ_H])
+                        self._set_actor_pos(0, local_idx, [x, y, self._OBJ_H])
                         columns.append((x, y, 1))
                         break
 
@@ -477,10 +476,10 @@ class BinEnvIsaacGym(SimulatorEnv):
         if self.n_envs > 1:
             if env_idx is not None:
                 initial_state = {
-                    'target_pos':    torch.tensor([self.bin_w/2, self.bin_d/2, OBJ_H]),
+                    'target_pos':    torch.tensor([self.bin_w/2, self.bin_d/2, self._OBJ_H]),
                     'target_quat':   torch.tensor([1.0, 0.0, 0.0, 0.0]),
                     'obstacle_pos':  torch.tile(
-                        torch.tensor([self.bin_w/2, self.bin_d/2, OBJ_H]).unsqueeze(0),
+                        torch.tensor([self.bin_w/2, self.bin_d/2, self._OBJ_H]).unsqueeze(0),
                         (self.n_obstacles, 1)
                     ),
                     'obstacle_quat': torch.tile(

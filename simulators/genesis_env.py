@@ -38,15 +38,9 @@ BIN_D = 1.0   # y extent (depth, from 0 to BIN_D)
 BIN_H = 0.5  # wall height
 WALL_T = 0.05 # wall thickness
 
-OBJ_SIZE = 0.08        # object cube side length
-OBJ_H    = OBJ_SIZE / 2  # object center z when resting on floor
-
 PUSHER_T = 0.012              # thin dimension of each pusher blade
-PUSHER_W = OBJ_SIZE * 0.88   # wide dimension (slightly smaller than objects)
 
 EXIT_Y = -0.05  # target exits when its y < EXIT_Y
-
-_PARK = [-0.3, BIN_D / 2, OBJ_H]  # safe parking position to the left (west) of the bin
 
 
 class BinEnv(SimulatorEnv):
@@ -92,6 +86,7 @@ class BinEnv(SimulatorEnv):
                  reward_cfg=None,
                  bin_size: float | None = None,
                  bin_size_factor: float = 0.9,
+                 obj_size: float = 0.05,
                  debug: bool = False):
         # Initialize Genesis once per process
         try:
@@ -106,10 +101,13 @@ class BinEnv(SimulatorEnv):
                          n_z_levels=n_z_levels, push_steps=push_steps, substeps=substeps,
                          wall_thickness=wall_thickness, difficult_spawn=difficult_spawn,
                          reward_cfg=reward_cfg, bin_size=bin_size,
-                         bin_size_factor=bin_size_factor, debug=debug)
+                         bin_size_factor=bin_size_factor, obj_size=obj_size, debug=debug)
 
-        self._park = [-0.3, self.bin_d / 2, OBJ_H]
-        self.z_levels = [OBJ_H + i * OBJ_SIZE for i in range(n_z_levels)]
+        self._OBJ_H    = self._OBJ_SIZE / 2
+        self._pusher_w = self._OBJ_SIZE * 0.88
+
+        self._park = [-0.3, self.bin_d / 2, self._OBJ_H]
+        self.z_levels = [self._OBJ_H + i * self._OBJ_SIZE for i in range(n_z_levels)]
 
         self._build_scene()
 
@@ -123,7 +121,7 @@ class BinEnv(SimulatorEnv):
         bw, bd = self.bin_w, self.bin_d
         # Camera scales with bin size: lookat at front-center of bin, pulled back 1.5x bin size
         _view_dist = max(bw, bd) * 1.5
-        _lookat = (bw / 2, bd * 0.1, OBJ_H)
+        _lookat = (bw / 2, bd * 0.1, self._OBJ_H)
         _cam_dir = (0.183, -0.825, 0.535)  # unit vector: right, back, up
         _cam_pos = tuple(_lookat[i] + _cam_dir[i] * _view_dist for i in range(3))
         self.scene = gs.Scene(
@@ -189,7 +187,7 @@ class BinEnv(SimulatorEnv):
         # --- N/S pusher blade: wide in x, thin in y ---
         self.pusher_ns = self.scene.add_entity(
             gs.morphs.Box(
-                size=(PUSHER_W, PUSHER_T, PUSHER_W),
+                size=(self._pusher_w, PUSHER_T, self._pusher_w),
                 pos=self._park,
             ),
             material=gs.materials.Rigid(rho=10000, friction=self.friction),
@@ -199,7 +197,7 @@ class BinEnv(SimulatorEnv):
         # --- E/W pusher blade: thin in x, wide in y ---
         self.pusher_ew = self.scene.add_entity(
             gs.morphs.Box(
-                size=(PUSHER_T, PUSHER_W, PUSHER_W),
+                size=(PUSHER_T, self._pusher_w, self._pusher_w),
                 pos=self._park,
             ),
             material=gs.materials.Rigid(rho=10000, friction=self.friction),
@@ -209,8 +207,8 @@ class BinEnv(SimulatorEnv):
         # --- target object ---
         self.target = self.scene.add_entity(
             gs.morphs.Box(
-                size=(OBJ_SIZE, OBJ_SIZE, OBJ_SIZE),
-                pos=(bw / 2, bd / 2, OBJ_H),
+                size=(self._OBJ_SIZE, self._OBJ_SIZE, self._OBJ_SIZE),
+                pos=(bw / 2, bd / 2, self._OBJ_H),
             ),
             material=gs.materials.Rigid(rho=50, friction=self.friction),
             surface=gs.surfaces.Default(color=(0.9, 0.2, 0.2), opacity=0.6),
@@ -221,8 +219,8 @@ class BinEnv(SimulatorEnv):
         for oi in range(self.n_obstacles):
             obs = self.scene.add_entity(
                 gs.morphs.Box(
-                    size=(OBJ_SIZE, OBJ_SIZE, OBJ_SIZE),
-                    pos=(bw / 2, bd / 2, OBJ_H),
+                    size=(self._OBJ_SIZE, self._OBJ_SIZE, self._OBJ_SIZE),
+                    pos=(bw / 2, bd / 2, self._OBJ_H),
                 ),
                 material=gs.materials.Rigid(rho=500, friction=self.friction),
                 surface=gs.surfaces.Default(color=_obstacle_color(oi, self.n_obstacles), opacity=0.6),
@@ -244,6 +242,7 @@ class BinEnv(SimulatorEnv):
         if state is None:
             state = random_initial_state(
                 self.n_obstacles,
+                obj_size=self._OBJ_SIZE,
                 stackable=self.stackable,
                 difficult_spawn=self.difficult_spawn,
                 bin_w=self.bin_w,
@@ -326,10 +325,10 @@ class BinEnv(SimulatorEnv):
         """
         if env_idx is not None:
             initial_state = {
-                'target_pos': torch.tensor([self.bin_w/2, self.bin_d/2, OBJ_H]),
+                'target_pos': torch.tensor([self.bin_w/2, self.bin_d/2, self._OBJ_H]),
                 'target_quat': torch.tensor([1.0, 0.0, 0.0, 0.0]),
                 'obstacle_pos': torch.tile(
-                    torch.tensor([self.bin_w/2, self.bin_d/2, OBJ_H]), (self.n_obstacles, 1)
+                    torch.tensor([self.bin_w/2, self.bin_d/2, self._OBJ_H]), (self.n_obstacles, 1)
                 ),
                 'obstacle_quat': torch.tile(
                     torch.tensor([1.0, 0.0, 0.0, 0.0]), (self.n_obstacles, 1)

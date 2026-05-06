@@ -38,6 +38,7 @@ def build_env(cfg, n_envs: int, show_viewer: bool = False, viewer_mode: str = 'r
         force_threshold=cfg.simulator.force_threshold,
         bin_size=cfg.get('bin_size', None),
         bin_size_factor=cfg.get('bin_size_factor', 0.9),
+        obj_size=cfg.get('obj_size', 0.05),
         debug=cfg.get('debug', False),
         target_z_level=cfg.get('target_z_level', None),
         force_obstacle_on_target=cfg.get('force_obstacle_on_target', False),
