@@ -1,4 +1,7 @@
 name: isaaclab
-force_threshold: 200.0  # N; stop pusher motion early if contact force exceeds this (0 to disable)
+force_threshold: 100.0  # N; stop pusher motion early if contact force exceeds this (0 to disable)
 position_iterations: 4   # PhysX min_position_iteration_count (default 4; higher = more accurate but slower)
 velocity_iterations: 1   # PhysX min_velocity_iteration_count
+env_spacing_factor: 1.5  # multiplier on (bin + walls) to set per-env world spacing
+post_teleport_steps: 10  # physics steps to settle after _set_state before executing a push (was 2)
+post_push_steps: 15      # physics steps to settle after push completes before reading state (was 4)

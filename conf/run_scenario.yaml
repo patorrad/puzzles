@@ -1,12 +1,16 @@
 defaults:
   - config
-  - override scenario: stacked_middle_target   # optional: pass scenario=<name> to use a preset environment
+  - override scenario: cube27   # optional: pass scenario=<name> to use a preset environment
   - _self_
 
 # Environment
 
 planner:
-  target_prob: 0.4
+  target_prob: 0.2
 
+parallel_envs: 128
+push_steps: 128
+verify_push_steps: 128   # null = same as push_steps; integer = use this for verify + video
+save: "cube27_plan.json"
 # Runtime
-pause_before_verify: false
+pause_before_verify: true

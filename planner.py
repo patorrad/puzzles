@@ -92,7 +92,7 @@ def _sample_action(state: dict, env: SimulatorEnv,
 
 
 def _verify_plan(env: SimulatorEnv, plan: list[dict], root_state: dict,
-                 n_tries: int, verbose: bool = True) -> int:
+                 n_tries: int, verbose: bool = True, pause: bool = False) -> int:
     """
     Re-run a full plan n_tries times in parallel from root_state.
 
@@ -108,19 +108,37 @@ def _verify_plan(env: SimulatorEnv, plan: list[dict], root_state: dict,
         print(f'  Verifying plan ({n_tries} parallel tries)...')
 
     render_verify = getattr(env, 'viewer_mode', 'replay') in ('always', 'verify')
-    if render_verify:
+    needs_viewer = render_verify or pause
+    if needs_viewer:
         prev_show_viewer = env.show_viewer
         env.show_viewer = True
 
     try:
         states = [copy.deepcopy(root_state) for _ in range(n_tries)]
 
+        if pause:
+            # Reset every env slot to root_state and render so the user can
+            # inspect the initial configuration before any push begins.
+            for i, state in enumerate(states):
+                env.set_state(state, i)
+
+            step_fn = getattr(env, '_step_sim', None)
+            if step_fn is not None:
+                n_settle = getattr(env, 'post_teleport_steps', 10)
+                for _ in range(n_settle):
+                    step_fn(render=True)
+            _wait = getattr(env, 'wait_for_input', None)
+            if _wait is not None:
+                _wait('  [Envs reset to initial state — Press Enter to start verification...]')
+            else:
+                input('  [Envs reset to initial state — Press Enter to start verification...]')
+
         for action in plan:
             pairs = [(state, action) for state in states]
             results = env.batch_evaluate(pairs)
             states = [new_state for new_state, _, _ in results]
     finally:
-        if render_verify:
+        if needs_viewer:
             env.show_viewer = prev_show_viewer
 
     rewards = [env._compute_reward(s) for s in states]
@@ -138,6 +156,7 @@ def _verify_all_plans(
     total_envs: int,
     min_verify_envs: int,
     verbose: bool = True,
+    pause: bool = False,
 ) -> list:
     """Verify multiple plans simultaneously by interleaving their env slots.
 
@@ -156,9 +175,11 @@ def _verify_all_plans(
     all_results = []
 
     render_verify = getattr(env, 'viewer_mode', 'replay') in ('always', 'verify')
-    if render_verify:
+    needs_viewer = render_verify or pause
+    if needs_viewer:
         prev_show_viewer = env.show_viewer
         env.show_viewer = True
+    paused = False
     try:
         for round_start in range(0, n, states_per_round):
             batch = plans_and_nodes[round_start : round_start + states_per_round]
@@ -171,6 +192,23 @@ def _verify_all_plans(
             plan_offsets = [i * envs_each for i in range(len(batch))]
             flat_states = [copy.deepcopy(root_state)
                            for _ in range(len(batch) * envs_each)]
+
+            if pause and not paused:
+                # Reset every env slot to root_state and render so the user can
+                # inspect the initial configuration before any push begins.
+                for i, state in enumerate(flat_states):
+                    env.set_state(state, i)
+                step_fn = getattr(env, '_step_sim', None)
+                if step_fn is not None:
+                    n_settle = getattr(env, 'post_teleport_steps', 10)
+                    for _ in range(n_settle):
+                        step_fn(render=True)
+                _wait = getattr(env, 'wait_for_input', None)
+                if _wait is not None:
+                    _wait('  [Envs reset to initial state — Press Enter to start verification...]')
+                else:
+                    input('  [Envs reset to initial state — Press Enter to start verification...]')
+                paused = True
 
             max_len = max(len(p) for p in plans)
             for step in range(max_len):
@@ -199,7 +237,7 @@ def _verify_all_plans(
                     print(f'    -> {successes}/{envs_each} succeeded, avg_reward={avg_reward:.3f}')
                 all_results.append((plan, node, successes, envs_each, avg_reward))
     finally:
-        if render_verify:
+        if needs_viewer:
             env.show_viewer = prev_show_viewer
 
     return all_results
@@ -409,11 +447,10 @@ class RRTPusher(_PlannerBase):
                 if verbose:
                     print(f'  Goal reached at iter {i+1}!')
                 path = self._extract_path(goal_node)
-                if pause_before_verify:
-                    input('  [Press Enter to start verification...]')
                 with self.env.push_steps_ctx(self.verify_push_steps):
                     verified, avg_reward = _verify_plan(self.env, path, root.state,
-                                                         self.batch_size, verbose)
+                                                         self.batch_size, verbose,
+                                                         pause=pause_before_verify)
                 if verified >= self.batch_size * self.verify_threshold:
                     goal_node.reward = avg_reward
                     if verbose:
@@ -652,12 +689,11 @@ class MCTSPusher(_PlannerBase):
                         seen.add(sig)
                         unique.append((path, node))
 
-                if pause_before_verify:
-                    input('  [Press Enter to start verification...]')
                 with self.env.push_steps_ctx(self.verify_push_steps):
                     verify_results = _verify_all_plans(
                         self.env, unique, root.state,
                         self.batch_size, self.min_verify_envs, verbose,
+                        pause=pause_before_verify,
                     )
 
                 best_verified = max(

@@ -139,6 +139,9 @@ class BinEnvIsaacLab(SimulatorEnv):
                  force_threshold: float = 100.0,
                  position_iterations: int = 4,
                  velocity_iterations: int = 1,
+                 env_spacing_factor: float = 2.5,
+                 post_teleport_steps: int = 10,
+                 post_push_steps: int = 15,
                  debug: bool = False,
                  target_z_level: int | None = None,
                  force_obstacle_on_target: bool = False,
@@ -169,6 +172,8 @@ class BinEnvIsaacLab(SimulatorEnv):
         self.force_threshold = force_threshold
         self.position_iterations = position_iterations
         self.velocity_iterations = velocity_iterations
+        self.post_teleport_steps = post_teleport_steps
+        self.post_push_steps = post_push_steps
         self._in_push: bool = False  # slims _step_sim to sensor-only refresh during push loop
         self._active_push_sensors: list = []  # set before each push to only update needed sensors
         self._dbg_t_sim: float = 0.0
@@ -184,7 +189,7 @@ class BinEnvIsaacLab(SimulatorEnv):
 
         # Compute per-env world origins so envs don't overlap.
         # Account for wall thickness so thick walls don't cause env overlap.
-        env_spacing = (max(self.bin_w, self.bin_d) + 2 * self.wall_thickness) * 2.5
+        env_spacing = (max(self.bin_w, self.bin_d) + 2 * self.wall_thickness) * env_spacing_factor
         n_cols      = max(1, int(np.ceil(np.sqrt(self.n_envs))))
         self.env_origins = torch.zeros(self.n_envs, 3, device=self.device)
         for ei in range(self.n_envs):
@@ -547,6 +552,22 @@ class BinEnvIsaacLab(SimulatorEnv):
         self._set_pose(self.pusher_ns_obj, self._park, _IDENTITY_QUAT, env_ids, env_idx=env_idx)
         self._set_pose(self.pusher_ew_obj, self._park, _IDENTITY_QUAT, env_ids, env_idx=env_idx)
 
+    def wait_for_input(self, prompt: str = '  [Press Enter to continue...]') -> None:
+        """Keep the Isaac Sim viewport live while waiting for the user to press Enter.
+
+        Spins on sim.render() + non-blocking stdin poll so the viewer stays
+        interactive (plain input() would freeze the UI thread).
+        """
+        import sys
+        import select
+        print(prompt, flush=True)
+        while True:
+            self.sim.render()
+            ready, _, _ = select.select([sys.stdin], [], [], 0)
+            if ready:
+                sys.stdin.readline()
+                break
+
     # ------------------------------------------------------------------
     # Object placement (single mode only)
     # ------------------------------------------------------------------
@@ -597,7 +618,7 @@ class BinEnvIsaacLab(SimulatorEnv):
         self._park_pushers(env_ids)
 
         # Final settle with all objects in place
-        for _ in range(60):
+        for _ in range(6000):
             self._step_sim(render=self.show_viewer)
 
         # Save as checkpoint for reset()
@@ -770,8 +791,8 @@ class BinEnvIsaacLab(SimulatorEnv):
             strokes.append((ptype, start, end))
 
         # Settle after teleporting objects (let solver resolve initial contacts)
-        self._step_sim(render=False)
-        self._step_sim(render=False)
+        for _ in range(self.post_teleport_steps):
+            self._step_sim(render=False)
 
         # 2. Warm-up: place pushers at stroke start, settle 2 ticks
         for env_idx, (ptype, start, _) in enumerate(strokes):
@@ -900,7 +921,7 @@ class BinEnvIsaacLab(SimulatorEnv):
         # 4. Park all pushers and settle
         for env_idx in range(k):
             self._park_pushers(env_ids_list[env_idx], env_idx=env_idx)
-        for _ in range(4):
+        for _ in range(self.post_push_steps):
             self._step_sim(render=self.show_viewer)
 
         # 5. Read back results
