@@ -179,7 +179,6 @@ def _verify_all_plans(
     if needs_viewer:
         prev_show_viewer = env.show_viewer
         env.show_viewer = True
-    paused = False
     try:
         for round_start in range(0, n, states_per_round):
             batch = plans_and_nodes[round_start : round_start + states_per_round]
@@ -192,23 +191,6 @@ def _verify_all_plans(
             plan_offsets = [i * envs_each for i in range(len(batch))]
             flat_states = [copy.deepcopy(root_state)
                            for _ in range(len(batch) * envs_each)]
-
-            if pause and not paused:
-                # Reset every env slot to root_state and render so the user can
-                # inspect the initial configuration before any push begins.
-                for i, state in enumerate(flat_states):
-                    env.set_state(state, i)
-                step_fn = getattr(env, '_step_sim', None)
-                if step_fn is not None:
-                    n_settle = getattr(env, 'post_teleport_steps', 10)
-                    for _ in range(n_settle):
-                        step_fn(render=True)
-                _wait = getattr(env, 'wait_for_input', None)
-                if _wait is not None:
-                    _wait('  [Envs reset to initial state — Press Enter to start verification...]')
-                else:
-                    input('  [Envs reset to initial state — Press Enter to start verification...]')
-                paused = True
 
             max_len = max(len(p) for p in plans)
             for step in range(max_len):
@@ -239,7 +221,6 @@ def _verify_all_plans(
     finally:
         if needs_viewer:
             env.show_viewer = prev_show_viewer
-
     return all_results
 
 

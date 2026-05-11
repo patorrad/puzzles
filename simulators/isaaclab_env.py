@@ -30,6 +30,7 @@ Quaternion convention: (w, x, y, z) — matches Genesis.
 
 import colorsys
 import logging
+import math
 import time
 import numpy as np
 import torch
@@ -141,6 +142,7 @@ class BinEnvIsaacLab(SimulatorEnv):
                  velocity_iterations: int = 1,
                  env_spacing_factor: float = 2.5,
                  post_teleport_steps: int = 10,
+                 teleport_settle_steps: int = 3,
                  post_push_steps: int = 15,
                  debug: bool = False,
                  target_z_level: int | None = None,
@@ -173,6 +175,7 @@ class BinEnvIsaacLab(SimulatorEnv):
         self.position_iterations = position_iterations
         self.velocity_iterations = velocity_iterations
         self.post_teleport_steps = post_teleport_steps
+        self.teleport_settle_steps = teleport_settle_steps
         self.post_push_steps = post_push_steps
         self._in_push: bool = False  # slims _step_sim to sensor-only refresh during push loop
         self._active_push_sensors: list = []  # set before each push to only update needed sensors
@@ -447,6 +450,26 @@ class BinEnvIsaacLab(SimulatorEnv):
         self._tgt_pose_buf = torch.zeros(1, 7, device=self.device)
         self._tgt_vel_buf  = torch.zeros(1, 6, device=self.device)
 
+        # Batch state-set buffers for _set_state_batch (used by _batch_evaluate_impl).
+        # (n_envs, 3) world origins — avoids per-env Python loops on the hot path.
+        self._origins_xyz = torch.tensor(
+            [[ox, oy, 0.0] for ox, oy in self._env_origins_xy],
+            dtype=torch.float32, device=self.device)
+        # (n_envs, 7) target pose buffer; quat cols pre-filled with identity.
+        self._batch_tgt_pose_buf = torch.zeros(self.n_envs, 7, dtype=torch.float32, device=self.device)
+        self._batch_tgt_pose_buf[:, 3:] = _iq
+        # (n_envs, n_obstacles, 13) obstacle state buffer (pos+quat+vel); vel stays zero.
+        self._batch_obs_state_buf = torch.zeros(
+            self.n_envs, self.n_obstacles, 13, dtype=torch.float32, device=self.device)
+        # Pre-built park poses in world frame for every env (n_envs, 7).
+        _park_t = torch.tensor(self._park, dtype=torch.float32, device=self.device)
+        self._batch_park_pose_ns = torch.zeros(self.n_envs, 7, dtype=torch.float32, device=self.device)
+        self._batch_park_pose_ew = torch.zeros(self.n_envs, 7, dtype=torch.float32, device=self.device)
+        self._batch_park_pose_ns[:, :3] = self._origins_xyz + _park_t
+        self._batch_park_pose_ew[:, :3] = self._origins_xyz + _park_t
+        self._batch_park_pose_ns[:, 3:] = _iq
+        self._batch_park_pose_ew[:, 3:] = _iq
+
     # ------------------------------------------------------------------
     # Coordinate helpers
     # ------------------------------------------------------------------
@@ -618,11 +641,23 @@ class BinEnvIsaacLab(SimulatorEnv):
         self._park_pushers(env_ids)
 
         # Final settle with all objects in place
-        for _ in range(6000):
+        for _ in range(60):
             self._step_sim(render=self.show_viewer)
 
         # Save as checkpoint for reset()
         self._initial_states = self._get_state(0)
+
+        # Warn if any obstacle is significantly tilted after settling
+        quats = self._initial_states['obstacle_quat']   # (n_obs, 4) wxyz
+        dot = quats[:, 0].abs()                          # |w| component; 1.0 = identity
+        tilt_deg = 2.0 * torch.acos(dot.clamp(max=1.0)) * (180.0 / math.pi)
+        bad = tilt_deg > 1.0
+        if bad.any():
+            for i in bad.nonzero(as_tuple=True)[0].tolist():
+                logger.warning(
+                    f'_place_objects: obstacle {i} has {tilt_deg[i].item():.1f}° tilt '
+                    f'after settle (quat={quats[i].tolist()})'
+                )
 
     # ------------------------------------------------------------------
     # State management
@@ -653,23 +688,37 @@ class BinEnvIsaacLab(SimulatorEnv):
             env_idx = 0
         if env_ids is None:
             env_ids = torch.tensor([env_idx], device=self.device, dtype=torch.long)
+        self._set_state_batch([state], env_ids)
 
-        ox, oy = self._env_origins_xy[env_idx]
-        tgt_pos  = state['target_pos'].to(self.device)
-        tgt_quat = state['target_quat'].to(self.device)
-        self._tgt_pose_buf[0, 0] = tgt_pos[0] + ox
-        self._tgt_pose_buf[0, 1] = tgt_pos[1] + oy
-        self._tgt_pose_buf[0, 2] = tgt_pos[2]
-        self._tgt_pose_buf[0, 3:] = tgt_quat
-        self.target_obj.write_root_pose_to_sim(self._tgt_pose_buf, env_ids=env_ids)
-        self.target_obj.write_root_velocity_to_sim(self._tgt_vel_buf, env_ids=env_ids)
-        origin = torch.tensor([ox, oy, 0.0], device=self.device)
-        obs_pos_w = state['obstacle_pos'].to(self.device) + origin
-        obs_quat  = state['obstacle_quat'].to(self.device)
-        obs_vel   = torch.zeros(self.n_obstacles, 6, device=self.device)
-        obs_state = torch.cat([obs_pos_w, obs_quat, obs_vel], dim=-1).unsqueeze(0)
-        self.obstacle_collection.write_object_state_to_sim(obs_state, env_ids=env_ids)
-        self._park_pushers(env_ids, env_idx=env_idx)
+    def _set_state_batch(self, states: list[dict],
+                         env_ids: torch.Tensor):
+        """Teleport k envs to k states in 6 batched API calls instead of k×6 sequential calls."""
+        k = len(states)
+        origins = self._origins_xyz[env_ids]           # (k, 3), pure GPU index
+
+        # Target
+        tgt_pos  = torch.stack([s['target_pos'].to(self.device)  for s in states])  # (k, 3)
+        tgt_quat = torch.stack([s['target_quat'].to(self.device) for s in states])  # (k, 4)
+        buf = self._batch_tgt_pose_buf[:k]
+        buf[:, :3] = tgt_pos + origins
+        buf[:, 3:]  = tgt_quat
+        self.target_obj.write_root_pose_to_sim(buf, env_ids=env_ids)
+        self.target_obj.write_root_velocity_to_sim(self._batch_vel_zero[:k], env_ids=env_ids)
+
+        # Obstacles
+        obs_pos  = torch.stack([s['obstacle_pos'].to(self.device)  for s in states])  # (k, n_obs, 3)
+        obs_quat = torch.stack([s['obstacle_quat'].to(self.device) for s in states])  # (k, n_obs, 4)
+        obs_buf  = self._batch_obs_state_buf[:k]
+        obs_buf[:, :, :3]  = obs_pos + origins.unsqueeze(1)
+        obs_buf[:, :, 3:7] = obs_quat
+        # obs_buf[:, :, 7:] stays zero (pre-zeroed at alloc time)
+        self.obstacle_collection.write_object_state_to_sim(obs_buf, env_ids=env_ids)
+
+        # Pushers — park poses pre-built per env, no Python loop
+        self.pusher_ns_obj.write_root_pose_to_sim(self._batch_park_pose_ns[:k], env_ids=env_ids)
+        self.pusher_ns_obj.write_root_velocity_to_sim(self._batch_vel_zero[:k], env_ids=env_ids)
+        self.pusher_ew_obj.write_root_pose_to_sim(self._batch_park_pose_ew[:k], env_ids=env_ids)
+        self.pusher_ew_obj.write_root_velocity_to_sim(self._batch_vel_zero[:k], env_ids=env_ids)
 
     def get_state(self, env_idx: int = 0) -> dict:
         """Public interface: get state from the given env slot."""
@@ -784,13 +833,22 @@ class BinEnvIsaacLab(SimulatorEnv):
         # 1. Teleport each env to its starting state; compute stroke geometry
         env_ids_list = [torch.tensor([i], device=self.device, dtype=torch.long)
                         for i in range(k)]
+        env_ids_k = torch.arange(k, device=self.device, dtype=torch.long)
+        states_k  = [s for s, _ in pairs]
         strokes: list[tuple[str, list, list]] = []
-        for env_idx, (state, action) in enumerate(pairs):
-            self._set_state(state, env_idx, env_ids=env_ids_list[env_idx])
+        self._set_state_batch(states_k, env_ids_k)
+        for _, action in pairs:
             ptype, start, end = self._action_to_stroke(action)
             strokes.append((ptype, start, end))
 
-        # Settle after teleporting objects (let solver resolve initial contacts)
+        # Repeated-teleport settle: re-write all objects to target positions after every
+        # step so the contact manifold builds up against the correct configuration rather
+        # than stale PhysX warm-start impulses from the prior frame.
+        for _ in range(self.teleport_settle_steps):
+            self._step_sim(render=False)
+            self._set_state_batch(states_k, env_ids_k)
+
+        # Free settle — lets objects find their resting contact.
         for _ in range(self.post_teleport_steps):
             self._step_sim(render=False)
 

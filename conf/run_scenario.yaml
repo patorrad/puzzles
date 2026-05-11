@@ -8,9 +8,9 @@ defaults:
 planner:
   target_prob: 0.2
 
-parallel_envs: 128
-push_steps: 128
-verify_push_steps: 128   # null = same as push_steps; integer = use this for verify + video
+parallel_envs: 512
+push_steps: 256
+verify_push_steps: 512   # null = same as push_steps; integer = use this for verify + video
 save: "cube27_plan.json"
 # Runtime
 pause_before_verify: true
