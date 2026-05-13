@@ -1,0 +1,37 @@
+defaults:
+  - config
+  - override simulator: isaaclab
+  - _self_
+
+# Scenario generation
+n_scenarios: 3
+n_obstacles: 3
+bin_size: 0.3
+seed: 42
+stackable: false
+difficult_spawn: false
+
+# Override config.yaml defaults for isaaclabmpc compatibility
+wall_thickness: 0.02
+friction: 1.2
+parallel_envs: 8
+viewer: headless
+
+# IsaacLab MPC subprocesses
+isaaclabmpc_timeout_s: 300
+isaaclabmpc_n_steps: 10000
+isaaclabmpc_dir: /home/jack/research/isaaclabmpc/examples/ur16e_reach_stand_blocks
+
+# Output / WandB
+output_dir: outputs
+wandb_project: bin-clearing-pipeline
+wandb_entity: null
+wandb_run_name: null
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  job_logging:
+    root:
+      level: WARNING

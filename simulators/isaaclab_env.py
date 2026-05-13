@@ -728,6 +728,15 @@ class BinEnvIsaacLab(SimulatorEnv):
         """Public interface: set state in env_idx (parallel) or env 0 (single)."""
         self._set_state(state, env_idx)
 
+    def close(self):
+        """Cleanly tear down the simulation so simulation_app.close() doesn't hang."""
+        if not hasattr(self, 'sim') or self.sim is None:
+            return
+        if not self.sim.is_stopped():
+            self.sim.stop()
+        self.sim.clear_all_callbacks()
+        self.sim.clear_instance()
+
     def reset(self, seed: int | None = None, env_idx: int | None = None) -> dict:
         """
         Reset environment.

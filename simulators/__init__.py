@@ -38,6 +38,7 @@ def build_env(cfg, n_envs: int, show_viewer: bool = False, viewer_mode: str = 'r
         force_threshold=cfg.simulator.force_threshold,
         env_spacing_factor=getattr(cfg.simulator, 'env_spacing_factor', 2.5),
         post_teleport_steps=getattr(cfg.simulator, 'post_teleport_steps', 10),
+        teleport_settle_steps=getattr(cfg.simulator, 'teleport_settle_steps', 3),
         post_push_steps=getattr(cfg.simulator, 'post_push_steps', 15),
         bin_size=cfg.get('bin_size', None),
         bin_size_factor=cfg.get('bin_size_factor', 0.9),
