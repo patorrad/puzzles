@@ -76,69 +76,8 @@ class AggregateStats:
 # ---------------------------------------------------------------------------
 
 def _render_state_image(state: dict, env) -> 'wandb.Image':
-    import matplotlib
-    matplotlib.use('Agg')
-    import matplotlib.pyplot as plt
-    import matplotlib.patches as patches
-    import io
-
-    bw, bd = env.bin_w, env.bin_d
-    half = env._OBJ_SIZE / 2
-
-    fig, ax = plt.subplots(figsize=(4, 4))
-    ax.set_xlim(-0.05, bw + 0.05)
-    ax.set_ylim(-0.15, bd + 0.05)
-    ax.set_aspect('equal')
-    ax.set_facecolor('#f5f5f5')
-
-    wt = env.wall_thickness
-    for xy, wh in [
-        ((-wt, 0),  (wt, bd)),   # west
-        ((bw, 0),   (wt, bd)),   # east
-        ((0, bd),   (bw, wt)),   # north
-    ]:
-        ax.add_patch(patches.Rectangle(xy, wh[0], wh[1], color='#333'))
-
-    obj_h = env._OBJ_SIZE / 2
-    for i in range(env.n_obstacles):
-        x = float(state['obstacle_pos'][i][0])
-        y = float(state['obstacle_pos'][i][1])
-        z = float(state['obstacle_pos'][i][2])
-        z_level = round((z - obj_h) / env._OBJ_SIZE)
-        ax.add_patch(patches.Rectangle(
-            (x - half, y - half), env._OBJ_SIZE, env._OBJ_SIZE,
-            color='steelblue', ec='navy', lw=0.5,
-            zorder=4 + z_level,
-        ))
-        if z_level > 0:
-            ax.text(x + half * 0.55, y + half * 0.55, str(z_level + 1),
-                    fontsize=6, color='white', fontweight='bold',
-                    ha='center', va='center', zorder=5 + z_level)
-
-    tx = float(state['target_pos'][0])
-    ty = float(state['target_pos'][1])
-    tz = float(state['target_pos'][2])
-    tz_level = round((tz - obj_h) / env._OBJ_SIZE)
-    ax.add_patch(patches.Rectangle(
-        (tx - half, ty - half), env._OBJ_SIZE, env._OBJ_SIZE,
-        color='crimson', ec='darkred', lw=0.5,
-        zorder=4 + tz_level,
-    ))
-    if tz_level > 0:
-        ax.text(tx + half * 0.55, ty + half * 0.55, str(tz_level + 1),
-                fontsize=6, color='white', fontweight='bold',
-                ha='center', va='center', zorder=5 + tz_level)
-
-    ax.annotate('', xy=(bw / 2, -0.10), xytext=(bw / 2, 0.02),
-                arrowprops=dict(arrowstyle='->', color='green', lw=1.5))
-    ax.set_xlabel('x (m)')
-    ax.set_ylabel('y (m)')
-    ax.set_title('Initial configuration')
-    fig.tight_layout()
-
-    buf = io.BytesIO()
-    fig.savefig(buf, format='png', dpi=100)
-
+    from visualization import render_scenario
+    fig = render_scenario(state, env.bin_w, env.bin_d, env._OBJ_SIZE, env.wall_thickness)
     return wandb.Image(fig)
 
 
