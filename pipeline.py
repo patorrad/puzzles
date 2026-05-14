@@ -26,7 +26,8 @@ python pipeline.py --config-name=pipeline wandb_project=my-project wandb_entity=
 """
 
 import json
-import os
+import multiprocessing
+import queue
 import signal
 import subprocess
 import sys
@@ -73,6 +74,67 @@ class MpcResult:
     block_positions_final: list | None = None
     step_completion_events: list | None = None
     mppi_cost_history: list | None = None
+
+
+# ---------------------------------------------------------------------------
+# Stage 2: Puzzle planning — child process worker
+# ---------------------------------------------------------------------------
+
+def _puzzle_worker(cfg: DictConfig, scenarios: list, out_dir: Path, q) -> None:
+    """Runs puzzle planning for all scenarios. Executed in a spawned child process.
+
+    The parent kills this process after reading results from q, so we intentionally
+    skip IsaacLab teardown — that would hang or corrupt GPU state anyway.
+    """
+    import os
+    if cfg.simulator.name == 'isaaclab' and cfg.get('viewer', 'headless') == 'headless':
+        os.environ['ISAACLAB_HEADLESS'] = '1'
+
+    from simulators import build_env
+    from main import save_solution
+
+    out_dir = Path(out_dir)
+    env = build_env(cfg, n_envs=cfg.parallel_envs, show_viewer=False,
+                    viewer_mode=cfg.get('viewer', 'headless'))
+
+    puzzle_results: list[PuzzleResult] = []
+    successful_names: list[str] = []
+    force_traces_map: dict[str, list] = {}
+    plans_map: dict[str, list] = {}
+
+    for i, (scenario_name, initial_state) in enumerate(scenarios):
+        seed = (cfg.seed + i) if cfg.seed is not None else i
+        result, plan = _plan_scenario(env, cfg, i, scenario_name, initial_state, seed)
+
+        if plan is not None:
+            final_state, force_traces = _get_final_state(env, plan, initial_state)
+            result.reward_components = env.compute_reward_components(final_state)
+            result.final_reward = sum(result.reward_components.values())
+            result.replay_success = env.is_goal(final_state)
+
+            solution_path = out_dir / 'solutions' / f'{scenario_name}.json'
+            save_solution(str(solution_path), plan, initial_state, cfg, env)
+
+            successful_names.append(scenario_name)
+            force_traces_map[scenario_name] = force_traces
+            plans_map[scenario_name] = plan
+
+        puzzle_results.append(result)
+
+    # Convert torch tensors in plans to plain lists before crossing the process
+    # boundary — torch's shared-memory fd mechanism doesn't work across spawn.
+    def _detach_plan(plan):
+        return [
+            {**a, 'push_pos': a['push_pos'].tolist()}
+            for a in plan
+        ]
+
+    q.put({
+        'puzzle_results': puzzle_results,
+        'successful': successful_names,
+        'force_traces': force_traces_map,
+        'plans': {k: _detach_plan(v) for k, v in plans_map.items()},
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -425,9 +487,6 @@ def _log_mpc_wandb(result: MpcResult, step: int):
 
 @hydra.main(version_base=None, config_path="conf", config_name="pipeline")
 def main(cfg: DictConfig) -> None:
-    if cfg.simulator.name == 'isaaclab':
-        os.environ['ISAACLAB_HEADLESS'] = '1'
-
     # ------------------------------------------------------------------
     # Stage 1: Generate scenarios (no simulator needed)
     # ------------------------------------------------------------------
@@ -436,18 +495,7 @@ def main(cfg: DictConfig) -> None:
     print('=' * 60)
     scenarios = _generate_scenarios(cfg)
 
-    # ------------------------------------------------------------------
-    # Build env for Stage 2
-    # ------------------------------------------------------------------
-    print('\n' + '=' * 60)
-    print(f'Building {cfg.simulator.name} env: {cfg.n_obstacles} obstacles, '
-          f'{cfg.parallel_envs} parallel envs')
-    print('=' * 60)
-    from simulators import build_env
-    env = build_env(cfg, n_envs=cfg.parallel_envs, show_viewer=False, viewer_mode='headless')
-
-    # Init WandB after the simulator — AppLauncher process-level setup can
-    # corrupt wandb's upload thread if wandb is initialised first.
+    # WandB can be initialised here now — the simulator runs in a child process.
     wandb.init(
         project=cfg.wandb_project,
         entity=cfg.wandb_entity if cfg.wandb_entity else None,
@@ -465,59 +513,69 @@ def main(cfg: DictConfig) -> None:
     (out_dir / 'logs').mkdir(parents=True, exist_ok=True)
     print(f'\nOutput directory: {out_dir}')
 
-    bin_size       = env.bin_w
-    obj_size       = env._OBJ_SIZE
-    wall_thickness = env.wall_thickness
-    force_threshold = getattr(env, 'force_threshold', None)
+    bin_size       = cfg.get('bin_size', 0.3)
+    obj_size       = cfg.get('obj_size', 0.05)
+    wall_thickness = cfg.get('wall_thickness', 0.02)
+    force_threshold = cfg.simulator.get('force_threshold', None)
 
     # ------------------------------------------------------------------
-    # Stage 2: Puzzle planning
+    # Stage 2: Puzzle planning (child process)
+    #
+    # IsaacLab doesn't shut down cleanly, so we run the solver in a
+    # spawned child process and kill it after results are received.
     # ------------------------------------------------------------------
     print('\n' + '=' * 60)
-    print('Stage 2: Puzzle planning')
+    print('Stage 2: Puzzle planning (child process)')
     print('=' * 60)
 
-    from main import save_solution
+    ctx = multiprocessing.get_context('spawn')
+    q = ctx.Queue()
+    proc = ctx.Process(target=_puzzle_worker, args=(cfg, scenarios, out_dir, q))
+    proc.start()
+
+    puzzle_timeout = cfg.get('puzzle_timeout_s', None)
+    worker_result = None
+    deadline = time.time() + puzzle_timeout if puzzle_timeout else None
+    while proc.is_alive():
+        try:
+            worker_result = q.get(timeout=0.5)
+            break
+        except queue.Empty:
+            pass
+        if deadline and time.time() >= deadline:
+            print(f'[pipeline] Puzzle worker timed out after {puzzle_timeout}s')
+            break
+
+    try:
+        proc.kill()
+    except OSError as e:
+        print(f'[pipeline] Puzzle worker already exited before kill: {e}')
+    proc.join(timeout=5)
 
     puzzle_results: list[PuzzleResult] = []
     successful: list[tuple[str, dict, Path]] = []
 
-    for i, (scenario_name, initial_state) in enumerate(scenarios):
-        seed = (cfg.seed + i) if cfg.seed is not None else i
+    if worker_result is not None:
+        initial_state_by_name = dict(scenarios)
+        for result in worker_result['puzzle_results']:
+            scenario_name = result.scenario_name
+            initial_state = initial_state_by_name[scenario_name]
+            plan = worker_result['plans'].get(scenario_name)
+            force_traces = worker_result['force_traces'].get(scenario_name, [])
 
-        result, plan = _plan_scenario(env, cfg, i, scenario_name, initial_state, seed)
+            if result.success:
+                solution_path = out_dir / 'solutions' / f'{scenario_name}.json'
+                successful.append((scenario_name, initial_state, solution_path))
 
-        force_traces = []
-        if plan is not None:
-            final_state, force_traces = _get_final_state(env, plan, initial_state)
-            result.reward_components = env.compute_reward_components(final_state)
-            result.final_reward = sum(result.reward_components.values())
-            result.replay_success = env.is_goal(final_state)
-
-            solution_path = out_dir / 'solutions' / f'{scenario_name}.json'
-            save_solution(str(solution_path), plan, initial_state, cfg, env)
-            successful.append((scenario_name, initial_state, solution_path))
-
-        puzzle_results.append(result)
-        _log_puzzle_wandb(
-            result, initial_state,
-            bin_size, obj_size, wall_thickness, force_threshold,
-            plan, force_traces, puzzle_results, i,
-        )
+            puzzle_results.append(result)
+            _log_puzzle_wandb(
+                result, initial_state,
+                bin_size, obj_size, wall_thickness, force_threshold,
+                plan, force_traces, puzzle_results, result.scenario_idx,
+            )
 
     n_puzzle_success = len(successful)
     print(f'\nPuzzle planning: {n_puzzle_success}/{cfg.n_scenarios} successful')
-
-    # ------------------------------------------------------------------
-    # Tear down IsaacLab before launching isaaclabmpc subprocesses
-    # ------------------------------------------------------------------
-    if hasattr(env, 'close'):
-        env.close()
-    del env
-    if cfg.simulator.name == 'isaaclab':
-        import simulators.isaaclab_env as _ilab
-        _ilab.simulation_app.close(skip_cleanup=True)
-        print('\n[pipeline] IsaacLab AppLauncher closed.')
 
     # ------------------------------------------------------------------
     # Stage 3: IsaacLab MPC
@@ -528,7 +586,7 @@ def main(cfg: DictConfig) -> None:
 
     mpc_results: list[MpcResult] = []
 
-    for i, (scenario_name, initial_state, solution_path) in enumerate(successful):
+    for scenario_name, initial_state, solution_path in successful:
         scenario_yaml = Path('conf/scenario/generated') / f'{scenario_name}.yaml'
         puzzle_idx = next(r.scenario_idx for r in puzzle_results if r.scenario_name == scenario_name)
 
@@ -536,7 +594,7 @@ def main(cfg: DictConfig) -> None:
             scenario_name, scenario_yaml, solution_path, out_dir, cfg
         )
         mpc_results.append(mpc_result)
-        _log_mpc_wandb(mpc_result, puzzle_idx)
+        _log_mpc_wandb(mpc_result, cfg.n_scenarios + puzzle_idx)
 
     # ------------------------------------------------------------------
     # Stage 4: Summary

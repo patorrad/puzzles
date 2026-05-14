@@ -3,6 +3,9 @@ defaults:
   - override simulator: isaaclab
   - _self_
 
+planner:
+  target_prob: 0.35
+
 # Scenario generation
 n_scenarios: 3
 n_obstacles: 3
@@ -16,6 +19,9 @@ wall_thickness: 0.02
 friction: 1.2
 parallel_envs: 8
 viewer: headless
+
+# Puzzle solver child process (null = wait indefinitely)
+puzzle_timeout_s: null
 
 # IsaacLab MPC subprocesses
 isaaclabmpc_timeout_s: 300
