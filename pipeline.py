@@ -31,6 +31,7 @@ import queue
 import signal
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -338,16 +339,38 @@ def _log_puzzle_wandb(result: PuzzleResult, initial_state, bin_size: float, obj_
 # Stage 3: IsaacLab MPC subprocess runner
 # ---------------------------------------------------------------------------
 
+def _stream_output(src, log_path: Path, prefix: str) -> threading.Thread:
+    """Daemon thread: copy lines from src to log_path and stdout with prefix."""
+    log_file = open(log_path, 'w')
+
+    def _run():
+        try:
+            for line in src:
+                log_file.write(line)
+                log_file.flush()
+                print(f"{prefix}{line}", end='', flush=True)
+        finally:
+            log_file.close()
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    return t
+
+
 def _run_isaaclabmpc(scenario_name: str, scenario_yaml: Path, solution_json: Path,
                      out_dir: Path, cfg: DictConfig) -> MpcResult:
     """Launch planner.py + world.py subprocesses. Returns MpcResult."""
     ilab_dir = Path(cfg.isaaclabmpc_dir)
-    result_json = out_dir / 'isaaclabmpc_results' / f'{scenario_name}.json'
-    telemetry_json = out_dir / 'telemetry' / f'{scenario_name}_planner.json'
+    # Resolve all paths to absolute before passing to subprocesses, which run
+    # with a different cwd (ilab_dir.parent.parent).
+    solution_json  = solution_json.resolve()
+    result_json    = (out_dir / 'isaaclabmpc_results' / f'{scenario_name}.json').resolve()
+    telemetry_json = (out_dir / 'telemetry' / f'{scenario_name}_planner.json').resolve()
     planner_log = out_dir / 'logs' / f'{scenario_name}_planner.txt'
-    world_log = out_dir / 'logs' / f'{scenario_name}_world.txt'
+    world_log   = out_dir / 'logs' / f'{scenario_name}_world.txt'
 
     python = sys.executable
+    show_viewer = cfg.get('show_mpc_viewer', False)
 
     planner_cmd = [
         python,
@@ -359,30 +382,41 @@ def _run_isaaclabmpc(scenario_name: str, scenario_yaml: Path, solution_json: Pat
     world_cmd = [
         python,
         str(ilab_dir / 'world.py'),
-        '--headless',
         '--scenario', str(scenario_yaml),
         '--n_steps', str(cfg.isaaclabmpc_n_steps),
         '--output_path', str(result_json),
     ]
+    if not show_viewer:
+        world_cmd.append('--headless')
 
-    print(f'\n[MPC] {scenario_name}: launching planner …')
-    with open(planner_log, 'w') as pf:
-        planner_proc = subprocess.Popen(
-            planner_cmd,
-            cwd=str(ilab_dir.parent.parent),
-            stdout=pf, stderr=subprocess.STDOUT,
-        )
+    print(f'\n[MPC] {scenario_name}: cwd={ilab_dir.parent.parent}')
+    print(f'[MPC] {scenario_name}: scenario_yaml exists={scenario_yaml.exists()} path={scenario_yaml}')
+    print(f'[MPC] {scenario_name}: solution_json exists={solution_json.exists()} path={solution_json}')
+    print(f'[MPC] {scenario_name}: planner cmd: {" ".join(planner_cmd)}')
+
+    print(f'[MPC] {scenario_name}: launching planner …')
+    planner_proc = subprocess.Popen(
+        planner_cmd,
+        cwd=str(ilab_dir.parent.parent),
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, bufsize=1,
+    )
+    _stream_output(planner_proc.stdout, planner_log, f'[{scenario_name}/planner] ')
 
     # Give the zerorpc server time to bind before world connects
     time.sleep(3)
 
+    print(f'[MPC] {scenario_name}: planner alive={planner_proc.poll() is None} '
+          f'(returncode={planner_proc.poll()})')
+    print(f'[MPC] {scenario_name}: world cmd: {" ".join(world_cmd)}')
     print(f'[MPC] {scenario_name}: launching world …')
-    with open(world_log, 'w') as wf:
-        world_proc = subprocess.Popen(
-            world_cmd,
-            cwd=str(ilab_dir.parent.parent),
-            stdout=wf, stderr=subprocess.STDOUT,
-        )
+    world_proc = subprocess.Popen(
+        world_cmd,
+        cwd=str(ilab_dir.parent.parent),
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, bufsize=1,
+    )
+    _stream_output(world_proc.stdout, world_log, f'[{scenario_name}/world] ')
 
     timed_out = False
     try:
@@ -397,6 +431,19 @@ def _run_isaaclabmpc(scenario_name: str, scenario_yaml: Path, solution_json: Pat
             planner_proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             planner_proc.kill()
+
+    print(f'[MPC] {scenario_name}: world exitcode={world_proc.returncode} '
+          f'planner exitcode={planner_proc.returncode}')
+    print(f'[MPC] {scenario_name}: result_json exists={result_json.exists()}')
+
+    def _tail(path: Path, n: int = 20) -> str:
+        if not path.exists():
+            return '  <file not found>'
+        lines = path.read_text().splitlines()
+        return '\n'.join(f'  {l}' for l in lines[-n:]) or '  <empty>'
+
+    print(f'[MPC] {scenario_name}: planner log (last 20 lines):\n{_tail(planner_log)}')
+    print(f'[MPC] {scenario_name}: world log (last 20 lines):\n{_tail(world_log)}')
 
     result_data = {}
     if result_json.exists():
@@ -427,9 +474,13 @@ def _run_isaaclabmpc(scenario_name: str, scenario_yaml: Path, solution_json: Pat
     return mpc_result
 
 
-def _log_mpc_wandb(result: MpcResult, step: int):
+def _log_mpc_wandb(result: MpcResult, step: int, initial_state=None,
+                   plan: list | None = None,
+                   bin_size: float = 0.3, obj_size: float = 0.05,
+                   wall_thickness: float = 0.02):
     """Log per-scenario MPC metrics to WandB."""
     import matplotlib.pyplot as plt
+    from visualization import render_ee_trajectory_mppi
 
     log = {
         'isaaclabmpc/success':          int(result.success),
