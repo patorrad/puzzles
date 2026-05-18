@@ -73,7 +73,6 @@ class BinEnvIsaacGym(SimulatorEnv):
     """
 
     def __init__(self, n_obstacles: int = 2, n_envs: int = 1,
-                 show_viewer: bool = False,
                  dt: float = 0.01, seed: int | None = None,
                  stackable: bool = False, friction: float = 1.0,
                  n_z_levels: int = 1,
@@ -88,7 +87,7 @@ class BinEnvIsaacGym(SimulatorEnv):
             raise ImportError("isaacgym is not installed. Install it before using BinEnvIsaacGym.")
 
         super().__init__(n_obstacles=n_obstacles, n_envs=n_envs,
-                         show_viewer=show_viewer, dt=dt, seed=seed,
+                         dt=dt, seed=seed,
                          stackable=stackable, friction=friction,
                          n_z_levels=n_z_levels, push_steps=push_steps,
                          substeps=substeps, wall_thickness=wall_thickness,

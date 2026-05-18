@@ -114,8 +114,6 @@ class BinEnvIsaacLab(SimulatorEnv):
     n_envs : int
         1 = single mode (checkpoint reset, viewer support).
         >1 = parallel mode (GPU batch evaluation).
-    show_viewer : bool
-        Only used when n_envs=1 and the app was launched with headless=False.
     dt : float
     seed : int | None
     stackable : bool
@@ -126,7 +124,6 @@ class BinEnvIsaacLab(SimulatorEnv):
     """
 
     def __init__(self, n_obstacles: int = 2, n_envs: int = 1,
-                 show_viewer: bool = False,
                  dt: float = 0.01, seed: int | None = None,
                  stackable: bool = False, friction: float = 1.0,
                  n_z_levels: int = 1,
@@ -156,7 +153,7 @@ class BinEnvIsaacLab(SimulatorEnv):
 
         super().__init__(
             n_obstacles=n_obstacles, n_envs=n_envs,
-            show_viewer=show_viewer, dt=dt, seed=seed,
+            dt=dt, seed=seed,
             stackable=stackable, friction=friction,
             n_z_levels=n_z_levels, push_steps=push_steps,
             substeps=substeps, wall_thickness=wall_thickness,

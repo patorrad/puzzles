@@ -50,7 +50,6 @@ class SimulatorEnv(ABC):
     _EXIT_Y   = -0.05  # target exits when its y < _EXIT_Y
 
     def __init__(self, n_obstacles: int = 2, n_envs: int = 1,
-                 show_viewer: bool = False,
                  dt: float = 0.01, seed: Optional[int] = None,
                  stackable: bool = False, friction: float = 1.0,
                  n_z_levels: int = 1,
@@ -68,8 +67,8 @@ class SimulatorEnv(ABC):
         self._OBJ_SIZE = obj_size
         self.n_obstacles = n_obstacles
         self.n_envs = n_envs
-        self.show_viewer = show_viewer
         self.viewer_mode = viewer_mode
+        self.show_viewer = viewer_mode == 'always'
         self.friction = friction
         self.dt = dt
         self.stackable = stackable

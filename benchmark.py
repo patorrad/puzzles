@@ -189,12 +189,10 @@ def main(cfg: DictConfig) -> None:
             os.environ['ISAACLAB_ENABLE_CAMERAS'] = '1'
 
     viewer_mode = cfg.viewer
-    show_viewer = viewer_mode == 'always'
     print(f'Building environment ({cfg.simulator.name}): '
           f'{cfg.n_obstacles} obstacle(s), parallel_envs={cfg.parallel_envs}')
     from simulators import build_env
-    env = build_env(cfg, n_envs=cfg.parallel_envs, show_viewer=show_viewer,
-                    viewer_mode=viewer_mode)
+    env = build_env(cfg, n_envs=cfg.parallel_envs, viewer_mode=viewer_mode)
 
     # Init wandb after the simulator — Isaac Sim's AppLauncher does process-level
     # setup (signal handlers, CUDA contexts) that can corrupt wandb's upload thread

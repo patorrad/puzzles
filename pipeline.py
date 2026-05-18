@@ -94,7 +94,7 @@ def _puzzle_worker(cfg: DictConfig, scenarios: list, out_dir: Path, q) -> None:
     from main import save_solution
 
     out_dir = Path(out_dir)
-    env = build_env(cfg, n_envs=cfg.parallel_envs, show_viewer=False,
+    env = build_env(cfg, n_envs=cfg.parallel_envs,
                     viewer_mode=cfg.get('viewer', 'headless'))
 
     puzzle_results: list[PuzzleResult] = []

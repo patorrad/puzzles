@@ -200,7 +200,7 @@ def _do_replay(cfg: DictConfig):
         'obstacle_quat': torch.tensor(data['initial_state']['obstacle_quat']),
     }
 
-    env = build_env(cfg, n_envs=1, show_viewer=True)
+    env = build_env(cfg, n_envs=1, viewer_mode='always')
     env.set_state(initial_state)
     if env.show_viewer:
         input('Press Enter to start replay...')
@@ -303,8 +303,6 @@ def main(cfg: DictConfig) -> None:
     if sim_name == 'isaaclab' and viewer_mode == 'headless':
         os.environ['ISAACLAB_HEADLESS'] = '1'
 
-    show_viewer = viewer_mode == 'always'
-
     # Scenario config groups land under cfg.scenario.* (no @package _global_).
     # Propagate env-relevant keys into root cfg before build_env reads them.
     if cfg.get('scenario') is not None:
@@ -319,8 +317,7 @@ def main(cfg: DictConfig) -> None:
 
     logger.info('Building environment (%s): %d obstacle(s), wall_thickness=%s, seed=%s',
                 sim_name, cfg.n_obstacles, cfg.wall_thickness, cfg.seed)
-    env = build_env(cfg, n_envs=cfg.parallel_envs, show_viewer=show_viewer,
-                    viewer_mode=viewer_mode)
+    env = build_env(cfg, n_envs=cfg.parallel_envs, viewer_mode=viewer_mode)
 
     if cfg.get('scenario') is not None:
         from omegaconf import OmegaConf
