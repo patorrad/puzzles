@@ -40,7 +40,7 @@ from types import SimpleNamespace
 import numpy as np
 import yaml
 import hydra
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig, OmegaConf, open_dict
 import wandb
 
 
@@ -142,8 +142,8 @@ def _puzzle_worker(cfg: DictConfig, scenarios: list, out_dir: Path, q) -> None:
 # Stage 1: Scenario generation
 # ---------------------------------------------------------------------------
 
-def _generate_scenarios(cfg: DictConfig) -> list[tuple[str, dict]]:
-    """Generate N scenario YAMLs + PNGs. Returns list of (scenario_name, initial_state)."""
+def _generate_scenarios(cfg: DictConfig, outdir: Path) -> list[tuple[str, dict]]:
+    """Generate N scenario YAMLs + PNGs into outdir. Returns list of (scenario_name, initial_state)."""
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
@@ -151,7 +151,6 @@ def _generate_scenarios(cfg: DictConfig) -> list[tuple[str, dict]]:
     from generate_scenarios import _state_to_dict, _InlineDumper
     from visualization import render_scenario
 
-    outdir = Path("conf/scenario/generated")
     outdir.mkdir(parents=True, exist_ok=True)
 
     bin_size = cfg.get('bin_size', 0.3)
@@ -492,16 +491,23 @@ def _log_mpc_wandb(result: MpcResult, step: int, initial_state=None,
         log['isaaclabmpc/step_rate'] = result.steps_completed / result.total_steps
 
     if result.ee_trajectory:
-        traj = np.array(result.ee_trajectory)
-        fig, ax = plt.subplots(figsize=(8, 3))
-        ts = list(range(len(traj)))
-        for j, label in enumerate(['x', 'y', 'z']):
-            ax.plot(ts, traj[:, j], label=label)
-        ax.set_xlabel('sample (every 50 sim steps)')
-        ax.set_ylabel('EE position (m)')
-        ax.set_title(f'EE trajectory — {result.scenario_name}')
-        ax.legend()
-        fig.tight_layout()
+        if initial_state is not None:
+            fig = render_ee_trajectory_mppi(
+                initial_state, bin_size, bin_size, obj_size, wall_thickness,
+                result.ee_trajectory,
+                plan=plan,
+                title=f'EE trajectory — {result.scenario_name}',
+            )
+        else:
+            traj = np.array(result.ee_trajectory)
+            fig, ax = plt.subplots(figsize=(8, 3))
+            for j, label in enumerate(['x_mppi', 'y_mppi', 'z_mppi']):
+                ax.plot(traj[:, j], label=label)
+            ax.set_xlabel('sample (every 50 sim steps)')
+            ax.set_ylabel('EE position (m)')
+            ax.set_title(f'EE trajectory — {result.scenario_name}')
+            ax.legend()
+            fig.tight_layout()
         log['isaaclabmpc/ee_trajectory'] = wandb.Image(fig)
         plt.close(fig)
 
@@ -536,97 +542,284 @@ def _log_mpc_wandb(result: MpcResult, step: int, initial_state=None,
 # Main
 # ---------------------------------------------------------------------------
 
+def _load_initial_state_from_yaml(yaml_path: Path) -> dict:
+    """Reconstruct a state dict from a generated scenario YAML."""
+    import torch
+    with open(yaml_path) as f:
+        sc = yaml.safe_load(f)
+    ist = sc['initial_state']
+    return {
+        'target_pos':    torch.tensor(ist['target_pos']),
+        'target_quat':   torch.tensor(ist['target_quat']),
+        'obstacle_pos':  torch.tensor([o['pos']  for o in ist['obstacles']]),
+        'obstacle_quat': torch.tensor([o['quat'] for o in ist['obstacles']]),
+    }
+
+
 @hydra.main(version_base=None, config_path="conf", config_name="pipeline")
 def main(cfg: DictConfig) -> None:
-    # ------------------------------------------------------------------
-    # Stage 1: Generate scenarios (no simulator needed)
-    # ------------------------------------------------------------------
-    print('\n' + '=' * 60)
-    print('Stage 1: Generating scenarios')
-    print('=' * 60)
-    scenarios = _generate_scenarios(cfg)
-
-    # WandB can be initialised here now — the simulator runs in a child process.
-    wandb.init(
-        project=cfg.wandb_project,
-        entity=cfg.wandb_entity if cfg.wandb_entity else None,
-        name=cfg.wandb_run_name if cfg.wandb_run_name else None,
-        config=OmegaConf.to_container(cfg, resolve=True),
-    )
-    while wandb.run is None:
-        time.sleep(1)
-
-    run_id = wandb.run.id
-    out_dir = Path(cfg.output_dir) / run_id
-    (out_dir / 'solutions').mkdir(parents=True, exist_ok=True)
-    (out_dir / 'isaaclabmpc_results').mkdir(parents=True, exist_ok=True)
-    (out_dir / 'telemetry').mkdir(parents=True, exist_ok=True)
-    (out_dir / 'logs').mkdir(parents=True, exist_ok=True)
-    print(f'\nOutput directory: {out_dir}')
-
+    initial_state_by_name: dict = {}
+    plans_by_name: dict = {}
     bin_size       = cfg.get('bin_size', 0.3)
     obj_size       = cfg.get('obj_size', 0.05)
     wall_thickness = cfg.get('wall_thickness', 0.02)
-    force_threshold = cfg.simulator.get('force_threshold', None)
 
-    # ------------------------------------------------------------------
-    # Stage 2: Puzzle planning (child process)
-    #
-    # IsaacLab doesn't shut down cleanly, so we run the solver in a
-    # spawned child process and kill it after results are received.
-    # ------------------------------------------------------------------
-    print('\n' + '=' * 60)
-    print('Stage 2: Puzzle planning (child process)')
-    print('=' * 60)
+    if cfg.get('scenario_file'):
+        # ------------------------------------------------------------------
+        # Single-scenario mode: load one YAML, run puzzle planning + MPC.
+        # Skips generation; useful for re-running or debugging a specific scene.
+        # ------------------------------------------------------------------
+        scenario_file = Path(cfg.scenario_file).resolve()
+        if not scenario_file.exists():
+            raise FileNotFoundError(f'scenario_file not found: {scenario_file}')
 
-    ctx = multiprocessing.get_context('spawn')
-    q = ctx.Queue()
-    proc = ctx.Process(target=_puzzle_worker, args=(cfg, scenarios, out_dir, q))
-    proc.start()
+        scenario_name = scenario_file.stem
+        initial_state = _load_initial_state_from_yaml(scenario_file)
+        scenarios = [(scenario_name, initial_state)]
 
-    puzzle_timeout = cfg.get('puzzle_timeout_s', None)
-    worker_result = None
-    deadline = time.time() + puzzle_timeout if puzzle_timeout else None
-    while proc.is_alive():
+        with open(scenario_file) as _f:
+            _sc_meta = yaml.safe_load(_f)
+        _obj_size  = cfg.get('obj_size', 0.05)
+        _obj_h     = _obj_size / 2
+        _all_z     = [float(initial_state['target_pos'][2])] + [
+                         float(initial_state['obstacle_pos'][i][2])
+                         for i in range(len(initial_state['obstacle_pos']))]
+        _inferred_z_levels = max(1, max(round((z - _obj_h) / _obj_size) for z in _all_z) + 1)
+
+        with open_dict(cfg):
+            cfg.n_scenarios  = 1
+            cfg.n_obstacles  = len(initial_state['obstacle_pos'])
+            cfg.n_z_levels   = _sc_meta.get('n_z_levels', _inferred_z_levels)
+            if 'bin_size'       in _sc_meta: cfg.bin_size       = _sc_meta['bin_size']
+            if 'wall_thickness' in _sc_meta: cfg.wall_thickness = _sc_meta['wall_thickness']
+            if 'friction'       in _sc_meta: cfg.friction       = _sc_meta['friction']
+
+        wandb.init(
+            project=cfg.wandb_project,
+            entity=cfg.wandb_entity if cfg.wandb_entity else None,
+            name=cfg.wandb_run_name if cfg.wandb_run_name else None,
+            config=OmegaConf.to_container(cfg, resolve=True),
+        )
+        while wandb.run is None:
+            time.sleep(1)
+
+        run_id = wandb.run.id
+        out_dir = Path(cfg.output_dir) / run_id
+        for subdir in ('scenarios', 'solutions', 'isaaclabmpc_results', 'telemetry', 'logs'):
+            (out_dir / subdir).mkdir(parents=True, exist_ok=True)
+        print(f'\nOutput directory: {out_dir}')
+
+        import shutil
+        shutil.copy(scenario_file, out_dir / 'scenarios' / f'{scenario_name}.yaml')
+
+        latest_link = Path(cfg.output_dir) / 'latest'
+        if latest_link.is_symlink():
+            latest_link.unlink()
+        latest_link.symlink_to(out_dir.resolve())
+
+        force_threshold = cfg.simulator.get('force_threshold', None)
+
+        print('\n' + '=' * 60)
+        print(f'Stage 1: Single scenario — {scenario_name}')
+        print('=' * 60)
+
+        print('\n' + '=' * 60)
+        print('Stage 2: Puzzle planning (child process)')
+        print('=' * 60)
+
+        ctx = multiprocessing.get_context('spawn')
+        q = ctx.Queue()
+        proc = ctx.Process(target=_puzzle_worker, args=(cfg, scenarios, out_dir, q))
+        proc.start()
+
+        puzzle_timeout = cfg.get('puzzle_timeout_s', None)
+        worker_result = None
+        deadline = time.time() + puzzle_timeout if puzzle_timeout else None
+        while proc.is_alive():
+            try:
+                worker_result = q.get(timeout=0.5)
+                break
+            except queue.Empty:
+                pass
+            if deadline and time.time() >= deadline:
+                print(f'[pipeline] Puzzle worker timed out after {puzzle_timeout}s')
+                break
+
         try:
-            worker_result = q.get(timeout=0.5)
-            break
-        except queue.Empty:
-            pass
-        if deadline and time.time() >= deadline:
-            print(f'[pipeline] Puzzle worker timed out after {puzzle_timeout}s')
-            break
+            proc.kill()
+        except OSError as e:
+            print(f'[pipeline] Puzzle worker already exited before kill: {e}')
+        proc.join(timeout=5)
 
-    try:
-        proc.kill()
-    except OSError as e:
-        print(f'[pipeline] Puzzle worker already exited before kill: {e}')
-    proc.join(timeout=5)
+        successful: list[tuple[str, Path]] = []
 
-    puzzle_results: list[PuzzleResult] = []
-    successful: list[tuple[str, dict, Path]] = []
+        if worker_result is not None:
+            initial_state_by_name[scenario_name] = initial_state
+            plans_by_name.update(worker_result['plans'])
+            puzzle_results: list[PuzzleResult] = []
+            for result in worker_result['puzzle_results']:
+                plan = worker_result['plans'].get(result.scenario_name)
+                force_traces = worker_result['force_traces'].get(result.scenario_name, [])
+                if result.success:
+                    successful.append((result.scenario_name,
+                                       out_dir / 'solutions' / f'{result.scenario_name}.json'))
+                puzzle_results.append(result)
+                _log_puzzle_wandb(
+                    result, initial_state,
+                    bin_size, obj_size, wall_thickness, force_threshold,
+                    plan, force_traces, puzzle_results, result.scenario_idx,
+                )
 
-    if worker_result is not None:
-        initial_state_by_name = dict(scenarios)
-        for result in worker_result['puzzle_results']:
-            scenario_name = result.scenario_name
-            initial_state = initial_state_by_name[scenario_name]
-            plan = worker_result['plans'].get(scenario_name)
-            force_traces = worker_result['force_traces'].get(scenario_name, [])
+    elif cfg.get('resume', False):
+        # ------------------------------------------------------------------
+        # Resume mode: skip scenario generation and puzzle planning,
+        # jump straight to Stage 3 using solutions already on disk.
+        # ------------------------------------------------------------------
+        resume_dir = cfg.get('resume_dir')
+        if resume_dir:
+            out_dir = Path(resume_dir)
+        else:
+            latest_link = Path(cfg.output_dir) / 'latest'
+            if not (latest_link.exists() or latest_link.is_symlink()):
+                raise ValueError(f'No latest run found at {latest_link}; set resume_dir explicitly')
+            out_dir = latest_link.resolve()
+            print(f'[resume] Using latest run: {out_dir}')
+        solutions_dir = out_dir / 'solutions'
+        scenarios_dir = out_dir / 'scenarios'
+        scenario_names = sorted(p.stem for p in scenarios_dir.glob('*.yaml'))
+        successful: list[tuple[str, Path]] = [
+            (name, solutions_dir / f'{name}.json')
+            for name in scenario_names
+            if (solutions_dir / f'{name}.json').exists()
+        ]
+        print(f'[resume] {len(successful)}/{len(scenario_names)} solutions found in {solutions_dir}')
 
-            if result.success:
-                solution_path = out_dir / 'solutions' / f'{scenario_name}.json'
-                successful.append((scenario_name, initial_state, solution_path))
+        for name, sol_path in successful:
+            yaml_path = scenarios_dir / f'{name}.yaml'
+            if yaml_path.exists():
+                initial_state_by_name[name] = _load_initial_state_from_yaml(yaml_path)
+            with open(sol_path) as f:
+                plans_by_name[name] = json.load(f).get('plan', [])
 
-            puzzle_results.append(result)
-            _log_puzzle_wandb(
-                result, initial_state,
-                bin_size, obj_size, wall_thickness, force_threshold,
-                plan, force_traces, puzzle_results, result.scenario_idx,
-            )
+        wandb.init(
+            project=cfg.wandb_project,
+            entity=cfg.wandb_entity if cfg.wandb_entity else None,
+            name=cfg.wandb_run_name if cfg.wandb_run_name else None,
+            config=OmegaConf.to_container(cfg, resolve=True),
+        )
+        while wandb.run is None:
+            time.sleep(1)
+        (out_dir / 'isaaclabmpc_results').mkdir(parents=True, exist_ok=True)
+        (out_dir / 'telemetry').mkdir(parents=True, exist_ok=True)
+        (out_dir / 'logs').mkdir(parents=True, exist_ok=True)
+
+    else:
+        # ------------------------------------------------------------------
+        # Stage 1: Generate scenarios (no simulator needed)
+        # ------------------------------------------------------------------
+        print('\n' + '=' * 60)
+        print('Stage 1: Generating scenarios')
+        print('=' * 60)
+
+        # Init WandB first so we have a run_id to build the output directory
+        # before scenario generation — scenarios go into the same run dir.
+        wandb.init(
+            project=cfg.wandb_project,
+            entity=cfg.wandb_entity if cfg.wandb_entity else None,
+            name=cfg.wandb_run_name if cfg.wandb_run_name else None,
+            config=OmegaConf.to_container(cfg, resolve=True),
+        )
+        while wandb.run is None:
+            time.sleep(1)
+
+        run_id = wandb.run.id
+        out_dir = Path(cfg.output_dir) / run_id
+        (out_dir / 'scenarios').mkdir(parents=True, exist_ok=True)
+        (out_dir / 'solutions').mkdir(parents=True, exist_ok=True)
+        (out_dir / 'isaaclabmpc_results').mkdir(parents=True, exist_ok=True)
+        (out_dir / 'telemetry').mkdir(parents=True, exist_ok=True)
+        (out_dir / 'logs').mkdir(parents=True, exist_ok=True)
+        print(f'\nOutput directory: {out_dir}')
+
+        latest_link = Path(cfg.output_dir) / 'latest'
+        if latest_link.is_symlink():
+            latest_link.unlink()
+        latest_link.symlink_to(out_dir.resolve())
+
+        # Keep conf/scenario/generated pointing to the latest run's scenarios
+        # so external tools and ad-hoc scripts find them at the familiar path.
+        generated_link = Path('conf/scenario/generated')
+        if generated_link.is_symlink():
+            generated_link.unlink()
+        elif generated_link.exists():
+            import shutil
+            shutil.rmtree(generated_link)
+        generated_link.symlink_to((out_dir / 'scenarios').resolve())
+
+        scenarios = _generate_scenarios(cfg, out_dir / 'scenarios')
+
+        force_threshold = cfg.simulator.get('force_threshold', None)
+
+        # ------------------------------------------------------------------
+        # Stage 2: Puzzle planning (child process)
+        #
+        # IsaacLab doesn't shut down cleanly, so we run the solver in a
+        # spawned child process and kill it after results are received.
+        # ------------------------------------------------------------------
+        print('\n' + '=' * 60)
+        print('Stage 2: Puzzle planning (child process)')
+        print('=' * 60)
+
+        ctx = multiprocessing.get_context('spawn')
+        q = ctx.Queue()
+        proc = ctx.Process(target=_puzzle_worker, args=(cfg, scenarios, out_dir, q))
+        proc.start()
+
+        puzzle_timeout = cfg.get('puzzle_timeout_s', None)
+        worker_result = None
+        deadline = time.time() + puzzle_timeout if puzzle_timeout else None
+        while proc.is_alive():
+            try:
+                worker_result = q.get(timeout=0.5)
+                break
+            except queue.Empty:
+                pass
+            if deadline and time.time() >= deadline:
+                print(f'[pipeline] Puzzle worker timed out after {puzzle_timeout}s')
+                break
+
+        try:
+            proc.kill()
+        except OSError as e:
+            print(f'[pipeline] Puzzle worker already exited before kill: {e}')
+        proc.join(timeout=5)
+
+        successful: list[tuple[str, Path]] = []
+
+        if worker_result is not None:
+            initial_state_by_name = dict(scenarios)  # populates the outer dict
+            plans_by_name.update(worker_result['plans'])
+            puzzle_results: list[PuzzleResult] = []
+            for result in worker_result['puzzle_results']:
+                scenario_name = result.scenario_name
+                initial_state = initial_state_by_name[scenario_name]
+                plan = worker_result['plans'].get(scenario_name)
+                force_traces = worker_result['force_traces'].get(scenario_name, [])
+
+                if result.success:
+                    solution_path = out_dir / 'solutions' / f'{scenario_name}.json'
+                    successful.append((scenario_name, solution_path))
+
+                puzzle_results.append(result)
+                _log_puzzle_wandb(
+                    result, initial_state,
+                    bin_size, obj_size, wall_thickness, force_threshold,
+                    plan, force_traces, puzzle_results, result.scenario_idx,
+                )
 
     n_puzzle_success = len(successful)
-    print(f'\nPuzzle planning: {n_puzzle_success}/{cfg.n_scenarios} successful')
+    if not cfg.get('resume', False):
+        print(f'\nPuzzle planning: {n_puzzle_success}/{cfg.n_scenarios} successful')
 
     # ------------------------------------------------------------------
     # Stage 3: IsaacLab MPC
@@ -637,15 +830,23 @@ def main(cfg: DictConfig) -> None:
 
     mpc_results: list[MpcResult] = []
 
-    for scenario_name, initial_state, solution_path in successful:
-        scenario_yaml = Path('conf/scenario/generated') / f'{scenario_name}.yaml'
-        puzzle_idx = next(r.scenario_idx for r in puzzle_results if r.scenario_name == scenario_name)
+    show_viewer = cfg.get('show_mpc_viewer', False)
+    for i, (scenario_name, solution_path) in enumerate(successful):
+        if show_viewer and i > 0:
+            input(f'\n[MPC] Press Enter to continue to scenario {i + 1}/{len(successful)} ({scenario_name}) …')
+
+        scenario_yaml = (out_dir / 'scenarios' / f'{scenario_name}.yaml').resolve()
 
         mpc_result = _run_isaaclabmpc(
             scenario_name, scenario_yaml, solution_path, out_dir, cfg
         )
         mpc_results.append(mpc_result)
-        _log_mpc_wandb(mpc_result, cfg.n_scenarios + puzzle_idx)
+        _log_mpc_wandb(
+            mpc_result, cfg.n_scenarios + i,
+            initial_state=initial_state_by_name.get(scenario_name),
+            plan=plans_by_name.get(scenario_name),
+            bin_size=bin_size, obj_size=obj_size, wall_thickness=wall_thickness,
+        )
 
     # ------------------------------------------------------------------
     # Stage 4: Summary
@@ -671,7 +872,7 @@ def main(cfg: DictConfig) -> None:
     })
 
     sc_artifact = wandb.Artifact('scenarios', type='dataset')
-    sc_artifact.add_dir('conf/scenario/generated')
+    sc_artifact.add_dir(str(out_dir / 'scenarios'))
     wandb.log_artifact(sc_artifact)
 
     sol_artifact = wandb.Artifact('solutions', type='dataset')
