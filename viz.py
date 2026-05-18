@@ -24,7 +24,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import Normalize
 
-from env import BIN_D, BIN_W, EXIT_Y, OBJ_SIZE
+from env import BIN_D, BIN_W, EXIT_X, OBJ_SIZE
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -35,11 +35,11 @@ _HALF = OBJ_SIZE / 2
 
 def _make_ax(ax, title: str) -> plt.Axes:
     if ax is None:
-        _, ax = plt.subplots(figsize=(6, 7))
-    ax.set_xlim(-0.06, BIN_W + 0.06)
-    ax.set_ylim(EXIT_Y - 0.04, BIN_D + 0.06)
+        _, ax = plt.subplots(figsize=(7, 6))
+    ax.set_xlim(EXIT_X - 0.04, BIN_D + 0.06)
+    ax.set_ylim(-0.06, BIN_W + 0.06)
     ax.set_aspect('equal')
-    ax.set_xlabel('x (m)')
+    ax.set_xlabel('x (m)  ← exit')
     ax.set_ylabel('y (m)')
     ax.set_title(title)
     return ax
@@ -48,12 +48,12 @@ def _make_ax(ax, title: str) -> plt.Axes:
 def _draw_bin(ax: plt.Axes):
     """Bin walls and exit zone."""
     kw = dict(color='steelblue', lw=2, zorder=1)
-    ax.plot([0, BIN_W], [BIN_D, BIN_D], **kw)   # north
-    ax.plot([0, 0],     [0, BIN_D],     **kw)   # west
-    ax.plot([BIN_W, BIN_W], [0, BIN_D], **kw)  # east
-    ax.axhspan(EXIT_Y, 0, alpha=0.12, color='limegreen', zorder=0)
-    ax.axhline(EXIT_Y, color='limegreen', lw=1.2, ls='--', zorder=1,
-               label=f'exit (y={EXIT_Y})')
+    ax.plot([BIN_D, BIN_D], [0, BIN_W],     **kw)   # north (+x)
+    ax.plot([0, BIN_D],     [0, 0],         **kw)   # west (-y)
+    ax.plot([0, BIN_D],     [BIN_W, BIN_W], **kw)   # east (+y)
+    ax.axvspan(EXIT_X, 0, alpha=0.12, color='limegreen', zorder=0)
+    ax.axvline(EXIT_X, color='limegreen', lw=1.2, ls='--', zorder=1,
+               label=f'exit (x={EXIT_X})')
 
 
 def _draw_objects(ax: plt.Axes, state: dict):

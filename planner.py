@@ -30,7 +30,7 @@ import time
 import numpy as np
 from typing import Optional
 
-from env import BinEnv, BIN_W, BIN_D, EXIT_Y, OBJ_SIZE
+from env import BinEnv, BIN_W, BIN_D, EXIT_X, OBJ_SIZE
 
 
 # Action types and their sampling weights (bias_toward_exit=True)
@@ -38,6 +38,16 @@ from env import BinEnv, BIN_W, BIN_D, EXIT_Y, OBJ_SIZE
 _ACTION_TYPES  = ['push_n', 'pull_s', 'push_e', 'push_w']
 _WEIGHTS_BIASED = np.array([0.45, 0.45, 0.05, 0.05])
 _WEIGHTS_FLAT   = np.array([0.25, 0.25, 0.25, 0.25])
+
+
+def _verify_path(env: BinEnv, path: list[dict], initial_state: dict) -> bool:
+    """Re-simulate a path from initial_state; return True only if goal is reached."""
+    env.set_state(initial_state)
+    for action in path:
+        _, _, done = _execute_action(env, action)
+        if done:
+            return True
+    return False
 
 
 def _execute_action(env: BinEnv, action: dict) -> tuple[dict, float, bool]:
@@ -220,19 +230,23 @@ class RRTPusher:
 
             if verbose and (i + 1) % 20 == 0:
                 elapsed = time.time() - t0
-                target_y = new_state['target_pos'][1]
+                target_x = new_state['target_pos'][0]
                 print(f'  RRT iter {i+1:3d}/{self.max_iter} | '
                       f'tree={len(tree)} | best_reward={best_reward:.3f} | '
-                      f'target_y={target_y:.3f} | {elapsed:.1f}s')
+                      f'target_x={target_x:.3f} | {elapsed:.1f}s')
 
             if done:
-                if verbose:
-                    print(f'  Goal reached at iter {i+1}!')
-                if draw:
-                    self._draw_solution(new_node)
-                self.tree = tree
-                self.best_node = new_node
-                return self._extract_path(new_node)
+                path_candidate = self._extract_path(new_node)
+                if _verify_path(self.env, path_candidate, initial_state):
+                    if verbose:
+                        print(f'  Goal reached and verified at iter {i+1}!')
+                    if draw:
+                        self._draw_solution(new_node)
+                    self.tree = tree
+                    self.best_node = new_node
+                    return path_candidate
+                elif verbose:
+                    print(f'  False goal at iter {i+1} (physics non-determinism), continuing...')
 
         if verbose:
             print(f'  RRT finished without reaching goal. Best reward={best_reward:.3f} '
@@ -409,11 +423,18 @@ class MCTSPusher:
                 best_leaf = node
 
             if node.done:
-                if verbose:
-                    print(f'  MCTS: Goal reached at simulation {sim_i+1}!')
-                self.root = root
-                self.best_leaf = node
-                return self._extract_path(node)
+                path_candidate = self._extract_path(node)
+                if _verify_path(self.env, path_candidate, initial_state):
+                    if verbose:
+                        print(f'  MCTS: Goal reached and verified at simulation {sim_i+1}!')
+                    self.root = root
+                    self.best_leaf = node
+                    return path_candidate
+                else:
+                    if verbose:
+                        print(f'  MCTS: False goal at simulation {sim_i+1} '
+                              f'(physics non-determinism), continuing...')
+                    node.done = False
 
             if verbose and (sim_i + 1) % 20 == 0:
                 elapsed = time.time() - t0
@@ -596,12 +617,17 @@ class ParallelRRTPusher(RRTPusher):
                     best_node = new_node
 
                 if done:
-                    if verbose:
-                        print(f'  Goal reached at batch {i+1}! '
-                              f'(~{(i+1)*k} total evals)')
-                    self.tree = tree
-                    self.best_node = new_node
-                    return self._extract_path(new_node)
+                    path_candidate = self._extract_path(new_node)
+                    if _verify_path(self.env, path_candidate, initial_state):
+                        if verbose:
+                            print(f'  Goal reached and verified at batch {i+1}! '
+                                  f'(~{(i+1)*k} total evals)')
+                        self.tree = tree
+                        self.best_node = new_node
+                        return path_candidate
+                    elif verbose:
+                        print(f'  False goal at batch {i+1} '
+                              f'(physics non-determinism), continuing...')
 
             if verbose and (i + 1) % 10 == 0:
                 elapsed = time.time() - t0

@@ -18,7 +18,7 @@ import numpy as np
 import genesis as gs
 
 from env import (BIN_W, BIN_D, BIN_H, WALL_T, OBJ_SIZE, OBJ_H,
-                 PUSHER_T, PUSHER_W, EXIT_Y, _PARK)
+                 PUSHER_T, PUSHER_W, EXIT_X)
 
 
 class ParallelBinEnv:
@@ -44,20 +44,22 @@ class ParallelBinEnv:
                  push_steps: int = 20, substeps: int = 4,
                  dt: float = 0.01,
                  bin_center: tuple[float, float] | None = None,
-                 initial_positions: dict | None = None):
+                 initial_positions: dict | None = None,
+                 floor_z: float = 0.0):
         self.n_envs             = n_envs
         self.n_obstacles        = n_obstacles
         self.friction           = friction
         self.push_steps         = push_steps
         self.substeps           = substeps
-        self.z_levels           = [OBJ_H + i * OBJ_SIZE for i in range(n_z_levels)]
+        self.floor_z            = floor_z
+        self.z_levels           = [floor_z + OBJ_H + i * OBJ_SIZE for i in range(n_z_levels)]
         self.initial_positions  = initial_positions or {}
 
-        cx, cy = bin_center if bin_center is not None else (BIN_W / 2, BIN_D / 2)
-        self.ox     = cx - BIN_W / 2
-        self.oy     = cy - BIN_D / 2
-        self.exit_y = EXIT_Y + self.oy
-        self._park  = [BIN_W / 2 + self.ox, -2.0 + self.oy, OBJ_H]
+        cx, cy = bin_center if bin_center is not None else (BIN_D / 2, BIN_W / 2)
+        self.ox     = cx - BIN_D / 2
+        self.oy     = cy - BIN_W / 2
+        self.exit_x = EXIT_X + self.ox
+        self._park  = [-2.0 + self.ox, BIN_W / 2 + self.oy, floor_z + OBJ_H]
 
         self._build_scene(dt)
 
@@ -87,41 +89,42 @@ class ParallelBinEnv:
                 surface=gs.surfaces.Default(color=color),
             )
 
+        fz = self.floor_z
         ox, oy = self.ox, self.oy
 
         # Static geometry (identical across all envs)
-        _box((BIN_W + 2*WALL_T, BIN_D + 2*WALL_T, WALL_T),
-             (BIN_W/2 + ox, BIN_D/2 + oy, -WALL_T/2), fixed=True)             # floor
-        _box((BIN_W + 2*WALL_T, WALL_T, BIN_H),
-             (BIN_W/2 + ox, BIN_D + WALL_T/2 + oy, BIN_H/2), fixed=True,
-             color=(0.5, 0.5, 0.8))                                             # north
-        _box((WALL_T, BIN_D, BIN_H),
-             (-WALL_T/2 + ox, BIN_D/2 + oy, BIN_H/2), fixed=True,
-             color=(0.5, 0.5, 0.8))                                             # west
-        _box((WALL_T, BIN_D, BIN_H),
-             (BIN_W + WALL_T/2 + ox, BIN_D/2 + oy, BIN_H/2), fixed=True,
-             color=(0.5, 0.5, 0.8))                                             # east
+        _box((BIN_D + 2*WALL_T, BIN_W + 2*WALL_T, WALL_T),
+             (BIN_D/2 + ox, BIN_W/2 + oy, fz - WALL_T/2), fixed=True)         # floor
+        _box((WALL_T, BIN_W + 2*WALL_T, BIN_H),
+             (BIN_D + WALL_T/2 + ox, BIN_W/2 + oy, fz + BIN_H/2), fixed=True,
+             color=(0.5, 0.5, 0.8))                                             # north (+x)
+        _box((BIN_D, WALL_T, BIN_H),
+             (BIN_D/2 + ox, -WALL_T/2 + oy, fz + BIN_H/2), fixed=True,
+             color=(0.5, 0.5, 0.8))                                             # west (-y)
+        _box((BIN_D, WALL_T, BIN_H),
+             (BIN_D/2 + ox, BIN_W + WALL_T/2 + oy, fz + BIN_H/2), fixed=True,
+             color=(0.5, 0.5, 0.8))                                             # east (+y)
 
         # Pushers
         self.pusher_ns = self.scene.add_entity(
-            gs.morphs.Box(size=(PUSHER_W, PUSHER_T, PUSHER_W), pos=self._park),
+            gs.morphs.Box(size=(PUSHER_T, PUSHER_W, PUSHER_W), pos=self._park),
             material=gs.materials.Rigid(rho=10000, friction=self.friction),
             surface=gs.surfaces.Default(color=(0.2, 0.9, 0.2)),
         )
         self.pusher_ew = self.scene.add_entity(
-            gs.morphs.Box(size=(PUSHER_T, PUSHER_W, PUSHER_W), pos=self._park),
+            gs.morphs.Box(size=(PUSHER_W, PUSHER_T, PUSHER_W), pos=self._park),
             material=gs.materials.Rigid(rho=10000, friction=self.friction),
             surface=gs.surfaces.Default(color=(0.9, 0.6, 0.1)),
         )
 
         # Determine initial spawn positions (may be overridden by initial_positions)
         fixed = self.initial_positions
-        tgt_xy = fixed.get('target', [BIN_W/2 + ox, BIN_D/2 + oy])
+        tgt_xy = fixed.get('target', [BIN_D/2 + ox, BIN_W/2 + oy])
 
         # Target
         self.target = self.scene.add_entity(
             gs.morphs.Box(size=(OBJ_SIZE, OBJ_SIZE, OBJ_SIZE),
-                          pos=(float(tgt_xy[0]), float(tgt_xy[1]), OBJ_H)),
+                          pos=(float(tgt_xy[0]), float(tgt_xy[1]), fz + OBJ_H)),
             material=gs.materials.Rigid(rho=50, friction=self.friction),
             surface=gs.surfaces.Default(color=(0.9, 0.2, 0.2), opacity=0.6),
         )
@@ -133,10 +136,10 @@ class ParallelBinEnv:
             if i < len(obs_positions):
                 ox_i, oy_i = float(obs_positions[i][0]), float(obs_positions[i][1])
             else:
-                ox_i, oy_i = BIN_W/2 + ox, BIN_D/2 + oy
+                ox_i, oy_i = BIN_D/2 + ox, BIN_W/2 + oy
             obs = self.scene.add_entity(
                 gs.morphs.Box(size=(OBJ_SIZE, OBJ_SIZE, OBJ_SIZE),
-                              pos=(ox_i, oy_i, OBJ_H)),
+                              pos=(ox_i, oy_i, fz + OBJ_H)),
                 material=gs.materials.Rigid(rho=500, friction=self.friction),
                 surface=gs.surfaces.Default(color=(0.3, 0.5, 0.9), opacity=0.6),
             )
@@ -193,20 +196,20 @@ class ParallelBinEnv:
         z     = action['push_z']
         if atype == 'push_n':
             return ('ns',
-                    np.array([pos[0], pos[1] - approach_dist, z]),
-                    np.array([pos[0], pos[1] + push_dist,     z]))
-        if atype == 'pull_s':
-            return ('ns',
-                    np.array([pos[0], pos[1] + approach_dist,       z]),
-                    np.array([pos[0], self.exit_y - approach_dist,  z]))
-        if atype == 'push_e':
-            return ('ew',
                     np.array([pos[0] - approach_dist, pos[1], z]),
                     np.array([pos[0] + push_dist,     pos[1], z]))
+        if atype == 'pull_s':
+            return ('ns',
+                    np.array([pos[0] + approach_dist,      pos[1], z]),
+                    np.array([self.exit_x - approach_dist, pos[1], z]))
+        if atype == 'push_e':
+            return ('ew',
+                    np.array([pos[0], pos[1] - approach_dist, z]),
+                    np.array([pos[0], pos[1] + push_dist,     z]))
         # push_w
         return ('ew',
-                np.array([pos[0] + approach_dist, pos[1], z]),
-                np.array([pos[0] - push_dist,     pos[1], z]))
+                np.array([pos[0], pos[1] + approach_dist, z]),
+                np.array([pos[0], pos[1] - push_dist,     z]))
 
     # ------------------------------------------------------------------
     # Batch evaluation  ← the core of this file
@@ -292,20 +295,20 @@ class ParallelBinEnv:
     # ------------------------------------------------------------------
 
     def _compute_reward(self, state: dict) -> float:
-        y = state['target_pos'][1]
-        bin_center_y = BIN_D / 2 + self.oy
-        r = float(np.clip((bin_center_y - y) / (BIN_D / 2 - EXIT_Y), 0, 1))
+        x = state['target_pos'][0]
+        bin_center_x = BIN_D / 2 + self.ox
+        r = float(np.clip((bin_center_x - x) / (BIN_D / 2 - EXIT_X), 0, 1))
         n_dropped = sum(1 for i in range(len(self.obstacles))
-                        if state['obstacle_pos'][i][1] < self.exit_y)
+                        if state['obstacle_pos'][i][0] < self.exit_x)
         print(r - 0.5 * n_dropped)
         return r - 0.5 * n_dropped
 
     def _is_goal(self, state: dict) -> bool:
-        if any(state['obstacle_pos'][i][1] < self.exit_y
+        if any(state['obstacle_pos'][i][0] < self.exit_x
                for i in range(len(self.obstacles))):
             return False
-        return float(state['target_pos'][1]) < self.exit_y
+        return float(state['target_pos'][0]) < self.exit_x
 
     def _obstacles_dropped(self, state: dict) -> bool:
-        return any(state['obstacle_pos'][i][1] < self.exit_y
+        return any(state['obstacle_pos'][i][0] < self.exit_x
                    for i in range(len(self.obstacles)))

@@ -1,15 +1,18 @@
 """
 BinEnv: Genesis simulation of a bin with objects.
 Two thin pushers (N/S-oriented and E/W-oriented) act kinematically.
-Goal: move the target object out of the bin through the open south side.
+Goal: move the target object out of the bin through the open -x face.
 
 Bin layout (top-down, z-up):
-  - Floor at z=0
-  - North wall: +y side
-  - West wall:  -x side
-  - East wall:  +x side
-  - OPEN south side: -y exit
+  - Floor at z=floor_z
+  - North wall: +x side
+  - West wall:  -y side
+  - East wall:  +y side
+  - OPEN exit:  -x face (toward robot)
   - Objects start inside the bin
+
+x/y axes match the isaaclabmpc world frame directly when bin_center and
+floor_z are configured from the isaaclabmpc config.
 """
 
 import os
@@ -26,15 +29,16 @@ BIN_D = 0.3   # y extent (depth, from 0 to BIN_D)
 BIN_H = 0.15  # wall height
 WALL_T = 0.02 # wall thickness
 
-OBJ_SIZE = 0.08        # object cube side length
+OBJ_SIZE = 0.05        # object cube side length
 OBJ_H    = OBJ_SIZE / 2  # object center z when resting on floor
 
 PUSHER_T = 0.012              # thin dimension of each pusher blade
 PUSHER_W = OBJ_SIZE * 0.88   # wide dimension (slightly smaller than objects)
 
-EXIT_Y = -0.05  # target exits when its y < EXIT_Y
+EXIT_X = -0.15  # target exits when its x < EXIT_X (open -x face)
+EXIT_Y = EXIT_X  # backward-compat alias
 
-_PARK = [BIN_W / 2, -2.0, OBJ_H]  # safe parking position outside the bin
+_PARK = [-2.0, BIN_W / 2, OBJ_H]  # safe parking position outside the bin
 
 
 class BinEnv:
@@ -66,7 +70,8 @@ class BinEnv:
                  n_z_levels: int = 1,
                  push_steps: int = 20, substeps: int = 4,
                  initial_positions: dict | None = None,
-                 bin_center: tuple[float, float] | None = None):
+                 bin_center: tuple[float, float] | None = None,
+                 floor_z: float = 0.0):
         self.n_obstacles = n_obstacles
         self.show_viewer = show_viewer
         self.friction = friction
@@ -78,17 +83,18 @@ class BinEnv:
         self.initial_positions = initial_positions  # optional {target:[x,y], obstacles:[[x,y],...]}
 
         # Offset from the default origin-anchored bin (corner at 0,0) to the
-        # desired centre position.  Defaults to the natural centre (BIN_W/2, BIN_D/2).
-        cx, cy = bin_center if bin_center is not None else (BIN_W / 2, BIN_D / 2)
-        self.ox = cx - BIN_W / 2   # x translation applied to all geometry
-        self.oy = cy - BIN_D / 2   # y translation applied to all geometry
-        self.exit_y = EXIT_Y + self.oy   # effective south-exit threshold
-        self._park = [BIN_W / 2 + self.ox, -2.0 + self.oy, OBJ_H]
+        # desired centre position.  Defaults to the natural centre (BIN_D/2, BIN_W/2).
+        cx, cy = bin_center if bin_center is not None else (BIN_D / 2, BIN_W / 2)
+        self.ox = cx - BIN_D / 2   # x translation: bin x spans [ox, ox+BIN_D]
+        self.oy = cy - BIN_W / 2   # y translation: bin y spans [oy, oy+BIN_W]
+        self.floor_z = floor_z
+        self.exit_x = EXIT_X + self.ox   # effective -x exit threshold
+        self._park = [-2.0 + self.ox, BIN_W / 2 + self.oy, self.floor_z + OBJ_H]
 
         self.rng = np.random.default_rng(seed)
 
         # Discrete z levels: floor height, one-box up, two-boxes up, …
-        self.z_levels = [OBJ_H + i * OBJ_SIZE for i in range(n_z_levels)]
+        self.z_levels = [self.floor_z + OBJ_H + i * OBJ_SIZE for i in range(n_z_levels)]
 
         self._build_scene()
 
@@ -119,62 +125,63 @@ class BinEnv:
             morph=gs.morphs.Plane(),
         )
 
+        fz = self.floor_z
         ox, oy = self.ox, self.oy
 
         # --- floor ---
         self.scene.add_entity(
             gs.morphs.Box(
-                size=(BIN_W + 2 * WALL_T, BIN_D + 2 * WALL_T, WALL_T),
-                pos=(BIN_W / 2 + ox, BIN_D / 2 + oy, -WALL_T / 2),
+                size=(BIN_D + 2 * WALL_T, BIN_W + 2 * WALL_T, WALL_T),
+                pos=(BIN_D / 2 + ox, BIN_W / 2 + oy, fz - WALL_T / 2),
                 fixed=True,
             ),
             surface=gs.surfaces.Default(color=(0.7, 0.6, 0.5)),
         )
 
-        # --- north wall ---
+        # --- north wall (+x face) ---
         self.scene.add_entity(
             gs.morphs.Box(
-                size=(BIN_W + 2 * WALL_T, WALL_T, BIN_H),
-                pos=(BIN_W / 2 + ox, BIN_D + WALL_T / 2 + oy, BIN_H / 2),
+                size=(WALL_T, BIN_W + 2 * WALL_T, BIN_H),
+                pos=(BIN_D + WALL_T / 2 + ox, BIN_W / 2 + oy, fz + BIN_H / 2),
                 fixed=True,
             ),
             surface=gs.surfaces.Default(color=(0.5, 0.5, 0.8), opacity=0.35),
         )
 
-        # --- west wall ---
+        # --- west wall (-y face) ---
         self.scene.add_entity(
             gs.morphs.Box(
-                size=(WALL_T, BIN_D, BIN_H),
-                pos=(-WALL_T / 2 + ox, BIN_D / 2 + oy, BIN_H / 2),
+                size=(BIN_D, WALL_T, BIN_H),
+                pos=(BIN_D / 2 + ox, -WALL_T / 2 + oy, fz + BIN_H / 2),
                 fixed=True,
             ),
             surface=gs.surfaces.Default(color=(0.5, 0.5, 0.8), opacity=0.35),
         )
 
-        # --- east wall ---
+        # --- east wall (+y face) ---
         self.scene.add_entity(
             gs.morphs.Box(
-                size=(WALL_T, BIN_D, BIN_H),
-                pos=(BIN_W + WALL_T / 2 + ox, BIN_D / 2 + oy, BIN_H / 2),
+                size=(BIN_D, WALL_T, BIN_H),
+                pos=(BIN_D / 2 + ox, BIN_W + WALL_T / 2 + oy, fz + BIN_H / 2),
                 fixed=True,
             ),
             surface=gs.surfaces.Default(color=(0.5, 0.5, 0.8), opacity=0.35),
         )
 
-        # --- N/S pusher blade: wide in x, thin in y ---
+        # --- N/S pusher blade: thin in x, wide in y (sweeps in x direction) ---
         self.pusher_ns = self.scene.add_entity(
             gs.morphs.Box(
-                size=(PUSHER_W, PUSHER_T, PUSHER_W),
+                size=(PUSHER_T, PUSHER_W, PUSHER_W),
                 pos=self._park,
             ),
             material=gs.materials.Rigid(rho=10000, friction=self.friction),
             surface=gs.surfaces.Default(color=(0.2, 0.9, 0.2), opacity=0.8),
         )
 
-        # --- E/W pusher blade: thin in x, wide in y ---
+        # --- E/W pusher blade: wide in x, thin in y (sweeps in y direction) ---
         self.pusher_ew = self.scene.add_entity(
             gs.morphs.Box(
-                size=(PUSHER_T, PUSHER_W, PUSHER_W),
+                size=(PUSHER_W, PUSHER_T, PUSHER_W),
                 pos=self._park,
             ),
             material=gs.materials.Rigid(rho=10000, friction=self.friction),
@@ -185,7 +192,7 @@ class BinEnv:
         self.target = self.scene.add_entity(
             gs.morphs.Box(
                 size=(OBJ_SIZE, OBJ_SIZE, OBJ_SIZE),
-                pos=(BIN_W / 2 + ox, BIN_D / 2 + oy, OBJ_H),
+                pos=(BIN_D / 2 + ox, BIN_W / 2 + oy, fz + OBJ_H),
             ),
             material=gs.materials.Rigid(rho=50, friction=self.friction),
             surface=gs.surfaces.Default(color=(0.9, 0.2, 0.2), opacity=0.6),
@@ -197,7 +204,7 @@ class BinEnv:
             obs = self.scene.add_entity(
                 gs.morphs.Box(
                     size=(OBJ_SIZE, OBJ_SIZE, OBJ_SIZE),
-                    pos=(BIN_W / 2 + ox, BIN_D / 2 + oy, OBJ_H),
+                    pos=(BIN_D / 2 + ox, BIN_W / 2 + oy, fz + OBJ_H),
                 ),
                 material=gs.materials.Rigid(rho=500, friction=self.friction),
                 surface=gs.surfaces.Default(color=(0.3, 0.5, 0.9), opacity=0.6),
@@ -222,8 +229,8 @@ class BinEnv:
         """
         fixed = self.initial_positions or {}
         margin = OBJ_SIZE * 0.7
-        x_lo, x_hi = margin + self.ox, BIN_W - margin + self.ox
-        y_lo, y_hi = margin + self.oy, BIN_D - margin + self.oy
+        x_lo, x_hi = margin + self.ox, BIN_D - margin + self.ox
+        y_lo, y_hi = margin + self.oy, BIN_W - margin + self.oy
 
         columns: list[tuple[float, float, int]] = []
 
@@ -232,14 +239,14 @@ class BinEnv:
             obs_positions = fixed.get('obstacles', [])
             if i < len(obs_positions):
                 x, y = float(obs_positions[i][0]), float(obs_positions[i][1])
-                obs.set_pos([x, y, OBJ_H])
+                obs.set_pos([x, y, self.floor_z + OBJ_H])
                 columns.append((x, y, 1))
             else:
                 placed = False
                 if self.stackable and columns and self.rng.random() < 0.5:
                     idx = self.rng.integers(len(columns))
                     x, y, count = columns[idx]
-                    obs.set_pos([x, y, OBJ_H + OBJ_SIZE * count])
+                    obs.set_pos([x, y, self.floor_z + OBJ_H + OBJ_SIZE * count])
                     columns[idx] = (x, y, count + 1)
                     placed = True
                 if not placed:
@@ -248,21 +255,21 @@ class BinEnv:
                         y = self.rng.uniform(y_lo, y_hi)
                         if all(np.hypot(x - cx, y - cy) > OBJ_SIZE * 1.5
                                for cx, cy, _ in columns):
-                            obs.set_pos([x, y, OBJ_H])
+                            obs.set_pos([x, y, self.floor_z + OBJ_H])
                             columns.append((x, y, 1))
                             break
 
         # Place target
         if 'target' in fixed:
             x, y = float(fixed['target'][0]), float(fixed['target'][1])
-            self.target.set_pos([x, y, OBJ_H])
+            self.target.set_pos([x, y, self.floor_z + OBJ_H])
             columns.append((x, y, 1))
         else:
             placed = False
             if self.stackable and columns and self.rng.random() < 0.5:
                 idx = self.rng.integers(len(columns))
                 x, y, count = columns[idx]
-                self.target.set_pos([x, y, OBJ_H + OBJ_SIZE * count])
+                self.target.set_pos([x, y, self.floor_z + OBJ_H + OBJ_SIZE * count])
                 columns[idx] = (x, y, count + 1)
                 placed = True
             if not placed:
@@ -271,7 +278,7 @@ class BinEnv:
                     y = self.rng.uniform(y_lo, y_hi)
                     if all(np.hypot(x - cx, y - cy) > OBJ_SIZE * 1.5
                            for cx, cy, _ in columns):
-                        self.target.set_pos([x, y, OBJ_H])
+                        self.target.set_pos([x, y, self.floor_z + OBJ_H])
                         columns.append((x, y, 1))
                         break
 
@@ -373,27 +380,27 @@ class BinEnv:
     def execute_ns_push(self, pos_2d: np.ndarray, z: float,
                         push_dist: float = 0.25, approach_dist: float = 0.12,
                         push_steps: int | None = None, step_delay: float = 0.0) -> tuple[dict, float, bool]:
-        """Push northward: pusher_ns enters from south, sweeps north."""
-        start = [pos_2d[0], pos_2d[1] - approach_dist, z]
-        end   = [pos_2d[0], pos_2d[1] + push_dist,     z]
+        """Push northward (+x): pusher_ns enters from -x side, sweeps toward +x."""
+        start = [pos_2d[0] - approach_dist, pos_2d[1], z]
+        end   = [pos_2d[0] + push_dist,     pos_2d[1], z]
         return self._stroke_and_eval(self.pusher_ns, start, end,
                                      push_steps or self.push_steps, step_delay)
 
     def execute_ns_pull(self, pos_2d: np.ndarray, z: float,
                         approach_dist: float = 0.12,
                         pull_steps: int | None = None, step_delay: float = 0.0) -> tuple[dict, float, bool]:
-        """Pull southward: pusher_ns hooks north of object, sweeps south to exit."""
-        start = [pos_2d[0], pos_2d[1] + approach_dist, z]
-        end   = [pos_2d[0], self.exit_y - approach_dist, z]
+        """Pull southward (-x): pusher_ns hooks +x side of object, sweeps toward exit."""
+        start = [pos_2d[0] + approach_dist,      pos_2d[1], z]
+        end   = [self.exit_x - approach_dist,    pos_2d[1], z]
         return self._stroke_and_eval(self.pusher_ns, start, end,
                                      pull_steps or self.push_steps, step_delay)
 
     def execute_ew_push(self, pos_2d: np.ndarray, z: float, direction: int,
                         push_dist: float = 0.25, approach_dist: float = 0.12,
                         push_steps: int | None = None, step_delay: float = 0.0) -> tuple[dict, float, bool]:
-        """Push east (direction=+1) or west (direction=-1): pusher_ew sweeps laterally."""
-        start = [pos_2d[0] - direction * approach_dist, pos_2d[1], z]
-        end   = [pos_2d[0] + direction * push_dist,     pos_2d[1], z]
+        """Push east (+y, direction=+1) or west (-y, direction=-1): pusher_ew sweeps laterally."""
+        start = [pos_2d[0], pos_2d[1] - direction * approach_dist, z]
+        end   = [pos_2d[0], pos_2d[1] + direction * push_dist,     z]
         return self._stroke_and_eval(self.pusher_ew, start, end,
                                      push_steps or self.push_steps, step_delay)
 
@@ -402,16 +409,16 @@ class BinEnv:
     # ------------------------------------------------------------------
 
     def _obstacles_dropped(self, state: dict) -> bool:
-        return any(state['obstacle_pos'][i][1] < self.exit_y
+        return any(state['obstacle_pos'][i][0] < self.exit_x
                    for i in range(len(self.obstacles)))
 
     def _compute_reward(self, state: dict) -> float:
-        y = state['target_pos'][1]
-        bin_center_y = BIN_D / 2 + self.oy
-        r = (bin_center_y - y) / (BIN_D / 2 - EXIT_Y)
+        x = state['target_pos'][0]
+        bin_center_x = BIN_D / 2 + self.ox
+        r = (bin_center_x - x) / (BIN_D / 2 - EXIT_X)
         r = float(np.clip(r, 0, 1))
         n_dropped = sum(1 for i in range(len(self.obstacles))
-                        if state['obstacle_pos'][i][1] < EXIT_Y)
+                        if state['obstacle_pos'][i][0] < self.exit_x)
         r -= 0.5 * n_dropped
         print(r)
         return r
@@ -419,7 +426,7 @@ class BinEnv:
     def _is_goal(self, state: dict) -> bool:
         if self._obstacles_dropped(state):
             return False
-        return float(state['target_pos'][1]) <= self.exit_y
+        return float(state['target_pos'][0]) <= self.exit_x
 
     def is_goal(self, state: dict) -> bool:
         return self._is_goal(state)

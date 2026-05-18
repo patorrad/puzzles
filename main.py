@@ -69,7 +69,9 @@ def parse_args():
                    help='Fixed position for an obstacle (repeat for each obstacle)')
     p.add_argument('--bin-center', type=float, nargs=2, default=None,
                    metavar=('X', 'Y'),
-                   help='Centre of the bin in world coordinates (default: 0.15 0.15)')
+                   help='Centre of the bin in world coordinates')
+    p.add_argument('--isaaclabmpc-config', type=str, default=None, metavar='FILE',
+                   help='Path to isaaclabmpc config.yaml; reads plane_z and bin_center')
     # Internal: used when this script relaunches itself just for replay
     p.add_argument('--_replay-file', default=None, help=argparse.SUPPRESS)
     return p.parse_args()
@@ -146,7 +148,8 @@ def _simulate_plan_steps(env, plan: list[dict], initial_state: dict) -> list[dic
     return steps
 
 
-def save_solution(path: str, plan: list[dict], initial_state: dict, args, env):
+def save_solution(path: str, plan: list[dict], initial_state: dict, args, env,
+                  floor_z: float = 0.0):
     """
     Export the plan and environment to JSON for the MPPI robotics simulator.
 
@@ -160,7 +163,7 @@ def save_solution(path: str, plan: list[dict], initial_state: dict, args, env):
     steps           : per-action start/end pose of the displaced object
     """
     from env import (BIN_W, BIN_D, BIN_H, WALL_T, OBJ_SIZE, OBJ_H,
-                     PUSHER_T, PUSHER_W, EXIT_Y)
+                     PUSHER_T, PUSHER_W, EXIT_X)
 
     # ActorWrapper-compatible dicts (matches GenesisWrapper's ActorWrapper fields)
     def make_actor(name: str, size: list, pos: list, color: list,
@@ -206,7 +209,8 @@ def save_solution(path: str, plan: list[dict], initial_state: dict, args, env):
             'WALL_T':     float(WALL_T),
             'OBJ_SIZE':   float(OBJ_SIZE),
             'OBJ_H':      float(OBJ_H),
-            'EXIT_Y':     float(EXIT_Y),
+            'EXIT_X':     float(EXIT_X),
+            'floor_z':    floor_z,
             'PUSHER_T':   float(PUSHER_T),
             'PUSHER_W':   float(PUSHER_W),
             'friction':   float(args.friction),
@@ -251,6 +255,8 @@ def _do_replay(args):
         'obstacle_pos':  np.array(data['initial_state']['obstacle_pos']),
         'obstacle_quat': np.array(data['initial_state']['obstacle_quat']),
     }
+    floor_z    = data.get('floor_z', 0.0)
+    bin_center = data.get('bin_center', None)
 
     from env import BinEnv
     env = BinEnv(
@@ -262,7 +268,8 @@ def _do_replay(args):
         n_z_levels=args.n_z_levels,
         push_steps=args.push_steps,
         substeps=args.substeps,
-        bin_center=tuple(args.bin_center) if args.bin_center else None,
+        bin_center=tuple(bin_center) if bin_center else None,
+        floor_z=floor_z,
     )
 
     # Restore the exact initial state the planner used
@@ -299,7 +306,7 @@ def _do_replay(args):
         input('Press Enter to close viewer...')
 
 
-def _launch_replay(plan, initial_state, args):
+def _launch_replay(plan, initial_state, args, floor_z: float = 0.0):
     """Serialize plan+state to a temp file, relaunch this script for replay."""
     data = {
         'plan': [
@@ -314,6 +321,8 @@ def _launch_replay(plan, initial_state, args):
             'obstacle_pos':  initial_state['obstacle_pos'].tolist(),
             'obstacle_quat': initial_state['obstacle_quat'].tolist(),
         },
+        'floor_z':    floor_z,
+        'bin_center': list(args.bin_center) if args.bin_center else None,
     }
     fd, path = tempfile.mkstemp(suffix='.json', prefix='puzzle_plan_')
     with os.fdopen(fd, 'w') as f:
@@ -383,6 +392,18 @@ def main():
 
     using_parallel = args.parallel_envs > 0
 
+    # Read plane_z (and optionally bin_center) from isaaclabmpc config
+    floor_z = 0.0
+    if args.isaaclabmpc_config:
+        import yaml
+        with open(args.isaaclabmpc_config) as f:
+            _icfg = yaml.safe_load(f)
+        floor_z = float(_icfg.get('plane_z', 0.0))
+        if args.bin_center is None and 'bin_center' in _icfg:
+            args.bin_center = _icfg['bin_center']
+        print(f'isaaclabmpc config: plane_z={floor_z}'
+              + (f', bin_center={args.bin_center}' if args.bin_center else ''))
+
     # In parallel mode always run headless — replay launches a fresh process
     show_viewer = (not using_parallel and
                    (args.show_during_planning or args.visualize_search
@@ -406,6 +427,7 @@ def main():
         substeps=args.substeps,
         initial_positions=initial_positions,
         bin_center=tuple(args.bin_center) if args.bin_center else None,
+        floor_z=floor_z,
     )
     initial_state = env.get_state()
     print(f'Target start: {np.round(initial_state["target_pos"], 3)}')
@@ -427,6 +449,7 @@ def main():
                 substeps=args.substeps,
                 bin_center=tuple(args.bin_center) if args.bin_center else None,
                 initial_positions=initial_positions,
+                floor_z=floor_z,
             )
             print(f'Running Parallel MCTS ({args.n_simulations} sims, '
                   f'{args.parallel_envs} envs)...')
@@ -466,6 +489,7 @@ def main():
                 substeps=args.substeps,
                 bin_center=tuple(args.bin_center) if args.bin_center else None,
                 initial_positions=initial_positions,
+                floor_z=floor_z,
             )
             print(f'Running Parallel RRT ({args.max_iter} batch iters × '
                   f'{args.parallel_envs} envs = '
@@ -512,20 +536,20 @@ def main():
         print(f'Plan found and verified: {len(plan)} actions — target exits the bin.')
     else:
         print(f'Partial plan ({len(plan)} actions): target did not exit the bin '
-              f'(target y={env.get_state()["target_pos"][1]:.4f}, exit_y={env.exit_y:.4f}).')
+              f'(target x={env.get_state()["target_pos"][0]:.4f}, exit_x={env.exit_x:.4f}).')
 
     for i, a in enumerate(plan):
         print(f'  {i+1}. [{a["action_type"]}] obj={a["obj_idx"]} '
               f'pos={np.round(a["push_pos"], 3)} z={a["push_z"]:.3f}')
 
     if args.save:
-        save_solution(args.save, plan, initial_state, args, env)
+        save_solution(args.save, plan, initial_state, args, env, floor_z=floor_z)
 
     # ---- replay ----
     if not args.no_replay:
         if using_parallel:
             # Fresh subprocess = clean Genesis context, no scene conflicts
-            _launch_replay(plan, initial_state, args)
+            _launch_replay(plan, initial_state, args, floor_z=floor_z)
         else:
             # Single-env mode: reuse the existing env
             env.reset()
