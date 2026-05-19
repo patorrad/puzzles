@@ -51,23 +51,17 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def _bin_to_mppi_local(pos: list) -> list:
-    """Convert a bin-env position to the MPPI-scene local (env-relative) frame.
+    """Constant linear transform: bin frame → Isaac Lab world frame.
 
-    Verified against all 4 block initial positions in scene.py _BLOCK_SPECS:
+    R = [[0,1,0],[1,0,0],[0,0,1]]  (swap X↔Y)
+    t = [0.10, 0.10, 0.810]        (near-robot offset + table surface height)
 
-        MPPI_X = bin_Y + 0.10
-        MPPI_Y = (bin_X - 0.15) + 0.10 * sign(bin_X - 0.15)
-        MPPI_Z = bin_Z + 0.810   (table top at 0.775 + 0.035 = 0.810)
-
-    The Y formula expands each block's lateral offset from the bin centre (0.15)
-    by an extra 0.10 m — matching the physical block placement in the MPPI scene
-    (see examples/ur16e_reach_stand_blocks/scene.py _BLOCK_SPECS).
+    All blocks land at MPPI Y ∈ [0.10, bin_size+0.10] — entirely on the
+    positive-Y side, clear of the robot stand footprint at |Y| < 0.10.
+    Matches scene.py _bin_to_mppi_local() — keep in sync.
     """
     x, y, z = pos
-    mppi_x = y + 0.10
-    mppi_y = (x - 0.15) + 0.10 * (1.0 if x >= 0.15 else -1.0)
-    mppi_z = z + 0.810
-    return [mppi_x, mppi_y, mppi_z]
+    return [y + 0.10, x + 0.10, z + 0.810]
 
 
 def _simulate_plan_steps(env, plan: list[dict], initial_state: dict) -> list[dict]:
