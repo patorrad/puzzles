@@ -3,7 +3,7 @@
 # Source: isaaclabmpc/examples/ur16e_reach_stand_blocks/solution_obs_3_simple_extraction.json
 
 n_obstacles: 3
-bin_size: 0.3
+bin_size: 0.2
 wall_thickness: 0.02
 friction: 1.2
 

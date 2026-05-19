@@ -18,7 +18,7 @@ difficult_spawn: false
 wall_thickness: 0.02
 friction: 1.2
 parallel_envs: 8
-viewer: always
+viewer: headless
 
 # Puzzle solver child process (null = wait indefinitely)
 puzzle_timeout_s: null
@@ -35,8 +35,9 @@ resume_dir: null
 # IsaacLab MPC subprocesses
 isaaclabmpc_timeout_s: 300
 isaaclabmpc_n_steps: 10000
-isaaclabmpc_dir: /home/jack/research/isaaclabmpc/.claude/worktrees/cube27/examples/ur16e_reach_stand_blocks
-show_mpc_viewer: true  # set true to open the Isaac viewer for world.py
+isaaclabmpc_dir: /home/jack/research/isaaclabmpc/examples/ur16e_reach_stand_blocks_jack
+show_mpc_planner_viewer: false  # open Isaac viewer during puzzle planning (planner.py / puzzle solver)
+show_mpc_world_viewer: true     # open Isaac viewer during MPC execution (world.py)
 
 # Output / WandB
 output_dir: outputs

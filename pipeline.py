@@ -88,7 +88,8 @@ def _puzzle_worker(cfg: DictConfig, scenarios: list, out_dir: Path, q) -> None:
     skip IsaacLab teardown — that would hang or corrupt GPU state anyway.
     """
     import os
-    if cfg.simulator.name == 'isaaclab' and cfg.get('viewer', 'headless') == 'headless':
+    planner_viewer_mode = 'always' if cfg.get('show_mpc_planner_viewer', False) else 'headless'
+    if cfg.simulator.name == 'isaaclab' and planner_viewer_mode == 'headless':
         os.environ['ISAACLAB_HEADLESS'] = '1'
 
     from simulators import build_env
@@ -96,7 +97,7 @@ def _puzzle_worker(cfg: DictConfig, scenarios: list, out_dir: Path, q) -> None:
 
     out_dir = Path(out_dir)
     env = build_env(cfg, n_envs=cfg.parallel_envs,
-                    viewer_mode=cfg.get('viewer', 'headless'))
+                    viewer_mode=planner_viewer_mode)
 
     puzzle_results: list[PuzzleResult] = []
     successful_names: list[str] = []
@@ -356,6 +357,14 @@ def _stream_output(src, log_path: Path, prefix: str) -> threading.Thread:
     return t
 
 
+def _check_port_free(port: int) -> None:
+    result = subprocess.run(['lsof', '-ti', f':{port}'], capture_output=True, text=True)
+    if result.stdout.strip():
+        pids = result.stdout.strip().replace('\n', ' ')
+        sys.exit(f'[MPC] ERROR: port {port} is already in use (pids: {pids}). '
+                 f'Kill the stale planner with: kill {pids}')
+
+
 def _run_isaaclabmpc(scenario_name: str, scenario_yaml: Path, solution_json: Path,
                      out_dir: Path, cfg: DictConfig) -> MpcResult:
     """Launch planner.py + world.py subprocesses. Returns MpcResult."""
@@ -369,7 +378,8 @@ def _run_isaaclabmpc(scenario_name: str, scenario_yaml: Path, solution_json: Pat
     world_log   = out_dir / 'logs' / f'{scenario_name}_world.txt'
 
     python = sys.executable
-    show_viewer = cfg.get('show_mpc_viewer', False)
+    show_planner_viewer = cfg.get('show_mpc_planner_viewer', False)
+    show_world_viewer   = cfg.get('show_mpc_world_viewer', False)
 
     planner_cmd = [
         python,
@@ -378,6 +388,8 @@ def _run_isaaclabmpc(scenario_name: str, scenario_yaml: Path, solution_json: Pat
         '--solution_path', str(solution_json),
         '--telemetry_path', str(telemetry_json),
     ]
+    if not show_planner_viewer:
+        planner_cmd.append('--headless')
     world_cmd = [
         python,
         str(ilab_dir / 'world.py'),
@@ -385,7 +397,7 @@ def _run_isaaclabmpc(scenario_name: str, scenario_yaml: Path, solution_json: Pat
         '--n_steps', str(cfg.isaaclabmpc_n_steps),
         '--output_path', str(result_json),
     ]
-    if not show_viewer:
+    if not show_world_viewer:
         world_cmd.append('--headless')
 
     print(f'\n[MPC] {scenario_name}: cwd={ilab_dir.parent.parent}')
@@ -393,6 +405,7 @@ def _run_isaaclabmpc(scenario_name: str, scenario_yaml: Path, solution_json: Pat
     print(f'[MPC] {scenario_name}: solution_json exists={solution_json.exists()} path={solution_json}')
     print(f'[MPC] {scenario_name}: planner cmd: {" ".join(planner_cmd)}')
 
+    _check_port_free(4242)
     print(f'[MPC] {scenario_name}: launching planner …')
     planner_proc = subprocess.Popen(
         planner_cmd,
@@ -435,7 +448,7 @@ def _run_isaaclabmpc(scenario_name: str, scenario_yaml: Path, solution_json: Pat
           f'planner exitcode={planner_proc.returncode}')
     print(f'[MPC] {scenario_name}: result_json exists={result_json.exists()}')
 
-    def _tail(path: Path, n: int = 20) -> str:
+    def _tail(path: Path, n: int = 40) -> str:
         if not path.exists():
             return '  <file not found>'
         lines = path.read_text().splitlines()
@@ -594,81 +607,122 @@ def main(cfg: DictConfig) -> None:
             if 'wall_thickness' in _sc_meta: cfg.wall_thickness = _sc_meta['wall_thickness']
             if 'friction'       in _sc_meta: cfg.friction       = _sc_meta['friction']
 
-        wandb.init(
-            project=cfg.wandb_project,
-            entity=cfg.wandb_entity if cfg.wandb_entity else None,
-            name=cfg.wandb_run_name if cfg.wandb_run_name else None,
-            config=OmegaConf.to_container(cfg, resolve=True),
-        )
-        while wandb.run is None:
-            time.sleep(1)
-
-        run_id = wandb.run.id
-        out_dir = Path(cfg.output_dir) / run_id
-        for subdir in ('scenarios', 'solutions', 'isaaclabmpc_results', 'telemetry', 'logs'):
-            (out_dir / subdir).mkdir(parents=True, exist_ok=True)
-        print(f'\nOutput directory: {out_dir}')
-
-        import shutil
-        shutil.copy(scenario_file, out_dir / 'scenarios' / f'{scenario_name}.yaml')
-
-        latest_link = Path(cfg.output_dir) / 'latest'
-        if latest_link.is_symlink():
-            latest_link.unlink()
-        latest_link.symlink_to(out_dir.resolve())
-
         force_threshold = cfg.simulator.get('force_threshold', None)
-
-        print('\n' + '=' * 60)
-        print(f'Stage 1: Single scenario — {scenario_name}')
-        print('=' * 60)
-
-        print('\n' + '=' * 60)
-        print('Stage 2: Puzzle planning (child process)')
-        print('=' * 60)
-
-        ctx = multiprocessing.get_context('spawn')
-        q = ctx.Queue()
-        proc = ctx.Process(target=_puzzle_worker, args=(cfg, scenarios, out_dir, q))
-        proc.start()
-
-        puzzle_timeout = cfg.get('puzzle_timeout_s', None)
-        worker_result = None
-        deadline = time.time() + puzzle_timeout if puzzle_timeout else None
-        while proc.is_alive():
-            try:
-                worker_result = q.get(timeout=0.5)
-                break
-            except queue.Empty:
-                pass
-            if deadline and time.time() >= deadline:
-                print(f'[pipeline] Puzzle worker timed out after {puzzle_timeout}s')
-                break
-
-        try:
-            proc.kill()
-        except OSError as e:
-            print(f'[pipeline] Puzzle worker already exited before kill: {e}')
-        proc.join(timeout=5)
-
         successful: list[tuple[str, Path]] = []
 
-        if worker_result is not None:
+        if cfg.get('resume', False):
+            # ------------------------------------------------------------------
+            # scenario_file + resume: skip planning, use existing solution.
+            # ------------------------------------------------------------------
+            _resume_dir = cfg.get('resume_dir')
+            if _resume_dir:
+                out_dir = Path(_resume_dir)
+            else:
+                latest_link = Path(cfg.output_dir) / 'latest'
+                if not (latest_link.exists() or latest_link.is_symlink()):
+                    raise ValueError(
+                        f'No latest run found at {latest_link}; set resume_dir explicitly')
+                out_dir = latest_link.resolve()
+                print(f'[resume] Using latest run: {out_dir}')
+
+            solution_path = out_dir / 'solutions' / f'{scenario_name}.json'
+            if not solution_path.exists():
+                raise FileNotFoundError(
+                    f'No solution for {scenario_name} in {out_dir / "solutions"}')
+
+            with open(solution_path) as f:
+                plans_by_name[scenario_name] = json.load(f).get('plan', [])
             initial_state_by_name[scenario_name] = initial_state
-            plans_by_name.update(worker_result['plans'])
-            puzzle_results: list[PuzzleResult] = []
-            for result in worker_result['puzzle_results']:
-                plan = worker_result['plans'].get(result.scenario_name)
-                force_traces = worker_result['force_traces'].get(result.scenario_name, [])
-                if result.success:
-                    successful.append((result.scenario_name,
-                                       out_dir / 'solutions' / f'{result.scenario_name}.json'))
-                puzzle_results.append(result)
-                _log_puzzle_wandb(
-                    result, initial_state,
-                    bin_size, obj_size, wall_thickness, force_threshold,
-                    plan, force_traces, puzzle_results, result.scenario_idx,
-                )
+            successful = [(scenario_name, solution_path)]
+            print(f'[resume] Found solution: {solution_path}')
+
+            wandb.init(
+                project=cfg.wandb_project,
+                entity=cfg.wandb_entity if cfg.wandb_entity else None,
+                name=cfg.wandb_run_name if cfg.wandb_run_name else None,
+                config=OmegaConf.to_container(cfg, resolve=True),
+            )
+            while wandb.run is None:
+                time.sleep(1)
+
+            for subdir in ('isaaclabmpc_results', 'telemetry', 'logs'):
+                (out_dir / subdir).mkdir(parents=True, exist_ok=True)
+
+        else:
+            # ------------------------------------------------------------------
+            # scenario_file normal: run puzzle planning then MPC.
+            # ------------------------------------------------------------------
+            wandb.init(
+                project=cfg.wandb_project,
+                entity=cfg.wandb_entity if cfg.wandb_entity else None,
+                name=cfg.wandb_run_name if cfg.wandb_run_name else None,
+                config=OmegaConf.to_container(cfg, resolve=True),
+            )
+            while wandb.run is None:
+                time.sleep(1)
+
+            run_id = wandb.run.id
+            out_dir = Path(cfg.output_dir) / run_id
+            for subdir in ('scenarios', 'solutions', 'isaaclabmpc_results', 'telemetry', 'logs'):
+                (out_dir / subdir).mkdir(parents=True, exist_ok=True)
+            print(f'\nOutput directory: {out_dir}')
+
+            import shutil
+            shutil.copy(scenario_file, out_dir / 'scenarios' / f'{scenario_name}.yaml')
+
+            latest_link = Path(cfg.output_dir) / 'latest'
+            if latest_link.is_symlink():
+                latest_link.unlink()
+            latest_link.symlink_to(out_dir.resolve())
+
+            print('\n' + '=' * 60)
+            print(f'Stage 1: Single scenario — {scenario_name}')
+            print('=' * 60)
+
+            print('\n' + '=' * 60)
+            print('Stage 2: Puzzle planning (child process)')
+            print('=' * 60)
+
+            ctx = multiprocessing.get_context('spawn')
+            q = ctx.Queue()
+            proc = ctx.Process(target=_puzzle_worker, args=(cfg, scenarios, out_dir, q))
+            proc.start()
+
+            puzzle_timeout = cfg.get('puzzle_timeout_s', None)
+            worker_result = None
+            deadline = time.time() + puzzle_timeout if puzzle_timeout else None
+            while proc.is_alive():
+                try:
+                    worker_result = q.get(timeout=0.5)
+                    break
+                except queue.Empty:
+                    pass
+                if deadline and time.time() >= deadline:
+                    print(f'[pipeline] Puzzle worker timed out after {puzzle_timeout}s')
+                    break
+
+            try:
+                proc.kill()
+            except OSError as e:
+                print(f'[pipeline] Puzzle worker already exited before kill: {e}')
+            proc.join(timeout=5)
+
+            if worker_result is not None:
+                initial_state_by_name[scenario_name] = initial_state
+                plans_by_name.update(worker_result['plans'])
+                puzzle_results: list[PuzzleResult] = []
+                for result in worker_result['puzzle_results']:
+                    plan = worker_result['plans'].get(result.scenario_name)
+                    force_traces = worker_result['force_traces'].get(result.scenario_name, [])
+                    if result.success:
+                        successful.append((result.scenario_name,
+                                           out_dir / 'solutions' / f'{result.scenario_name}.json'))
+                    puzzle_results.append(result)
+                    _log_puzzle_wandb(
+                        result, initial_state,
+                        bin_size, obj_size, wall_thickness, force_threshold,
+                        plan, force_traces, puzzle_results, result.scenario_idx,
+                    )
 
     elif cfg.get('resume', False):
         # ------------------------------------------------------------------
@@ -830,7 +884,7 @@ def main(cfg: DictConfig) -> None:
 
     mpc_results: list[MpcResult] = []
 
-    show_viewer = cfg.get('show_mpc_viewer', False)
+    show_viewer = cfg.get('show_mpc_world_viewer', False)
     for i, (scenario_name, solution_path) in enumerate(successful):
         if show_viewer and i > 0:
             input(f'\n[MPC] Press Enter to continue to scenario {i + 1}/{len(successful)} ({scenario_name}) …')
