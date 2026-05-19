@@ -149,6 +149,36 @@ def _verify_plan(env: SimulatorEnv, plan: list[dict], root_state: dict,
     return successes, avg_reward
 
 
+def _prune_plan(env: SimulatorEnv, plan: list[dict], root_state: dict,
+                n_tries: int, verify_threshold: float, verbose: bool = True) -> list[dict]:
+    """
+    Remove unnecessary steps from a verified plan.
+
+    For each step, checks whether the plan still passes verification without it.
+    If so, the step is dropped and the scan restarts from the beginning (since
+    earlier steps may now also be removable). Stops when no further steps can be
+    removed without dropping below verify_threshold.
+    """
+    original_len = len(plan)
+    changed = True
+    while changed:
+        changed = False
+        for i in range(len(plan)):
+            candidate = plan[:i] + plan[i + 1:]
+            if not candidate:
+                break
+            successes, _ = _verify_plan(env, candidate, root_state, n_tries, verbose=False)
+            if successes / n_tries >= verify_threshold:
+                if verbose:
+                    print(f'  Pruned step {i} ({plan[i]["action_type"]} obj={plan[i]["obj_idx"]})')
+                plan = candidate
+                changed = True
+                break
+    if verbose:
+        print(f'  Pruning complete: {original_len} → {len(plan)} steps')
+    return plan
+
+
 def _verify_all_plans(
     env: SimulatorEnv,
     plans_and_nodes: list,
@@ -233,11 +263,13 @@ class _PlannerBase:
 
     def __init__(self, env: SimulatorEnv, verify_threshold: float,
                  min_verify_envs: int, seed: int | None,
-                 verify_push_steps: int | None = None):
+                 verify_push_steps: int | None = None,
+                 prune_plan: bool = False):
         self.env = env
         self.verify_threshold = verify_threshold
         self.min_verify_envs = min_verify_envs
         self.verify_push_steps = verify_push_steps
+        self.prune_plan = prune_plan
         self.batch_size = env.n_envs  # 1 for single, n_envs for parallel
         if seed is not None:
             torch.manual_seed(seed)
@@ -255,6 +287,7 @@ class _PlannerBase:
     def from_cfg(cls, env: SimulatorEnv, cfg, seed: int) -> '_PlannerBase':
         """Instantiate the correct planner from a Hydra config."""
         aw = cfg.planner.get('action_weights', None)
+        prune = cfg.get('prune_plan', False)
         if cfg.planner.name == 'mcts':
             return MCTSPusher(
                 env=env,
@@ -268,6 +301,7 @@ class _PlannerBase:
                 min_verify_envs=cfg.min_verify_envs,
                 verify_push_steps=cfg.get('verify_push_steps', None),
                 action_weights=list(aw) if aw is not None else None,
+                prune_plan=prune,
             )
         else:
             return RRTPusher(
@@ -281,6 +315,7 @@ class _PlannerBase:
                 min_verify_envs=cfg.min_verify_envs,
                 verify_push_steps=cfg.get('verify_push_steps', None),
                 action_weights=list(aw) if aw is not None else None,
+                prune_plan=prune,
             )
 
     def verify(self, plan: list[dict], initial_state: dict,
@@ -337,8 +372,9 @@ class RRTPusher(_PlannerBase):
                  goal_bias: float = 0.3, target_prob: float = 0.6, seed: int | None = 42,
                  verify_threshold: float = 0.75, min_verify_envs: int = 16,
                  verify_push_steps: int | None = None,
-                 action_weights: list[float] | None = None):
-        super().__init__(env, verify_threshold, min_verify_envs, seed, verify_push_steps)
+                 action_weights: list[float] | None = None,
+                 prune_plan: bool = False):
+        super().__init__(env, verify_threshold, min_verify_envs, seed, verify_push_steps, prune_plan)
         self.max_iter = max_iter
         self.max_depth = max_depth
         self.goal_bias = goal_bias
@@ -440,6 +476,10 @@ class RRTPusher(_PlannerBase):
                         if self.env.debug:
                             for k, v in components.items():
                                 print(f'    {k}: {v:.4f}')
+                    if self.prune_plan:
+                        with self.env.push_steps_ctx(self.verify_push_steps):
+                            path = _prune_plan(self.env, path, root.state,
+                                               self.batch_size, self.verify_threshold, verbose)
                     if draw:
                         self._draw_solution(goal_node)
                     self.tree = tree
@@ -604,8 +644,9 @@ class MCTSPusher(_PlannerBase):
                  c_ucb: float = 1.4, target_prob: float = 0.6, seed: int | None = 42,
                  verify_threshold: float = 0.75, min_verify_envs: int = 16,
                  verify_push_steps: int | None = None,
-                 action_weights: list[float] | None = None):
-        super().__init__(env, verify_threshold, min_verify_envs, seed, verify_push_steps)
+                 action_weights: list[float] | None = None,
+                 prune_plan: bool = False):
+        super().__init__(env, verify_threshold, min_verify_envs, seed, verify_push_steps, prune_plan)
         self.n_simulations = n_simulations
         self.rollout_depth = rollout_depth
         self.max_depth = max_depth
@@ -693,6 +734,10 @@ class MCTSPusher(_PlannerBase):
                         if self.env.debug:
                             for k, v in components.items():
                                 print(f'    {k}: {v:.4f}')
+                    if self.prune_plan:
+                        with self.env.push_steps_ctx(self.verify_push_steps):
+                            path = _prune_plan(self.env, path, root.state,
+                                               self.batch_size, self.verify_threshold, verbose)
                     self.root = root
                     self.best_leaf = goal_node
                     return path

@@ -28,6 +28,7 @@ seed: null
 # Runtime
 verify_threshold: 0.75   # fraction of envs that must succeed to accept a plan
 min_verify_envs: 16      # minimum envs allocated per plan during multi-plan verification
+prune_plan: true        # if true, remove redundant steps from the solution after verification
 viewer: always        # headless | replay | verify | always
 pause_before_verify: false
 save: null          # generic solution save path (any use)
