@@ -97,16 +97,14 @@ def _simulate_plan_steps(env, plan: list[dict], initial_state: dict) -> list[dic
         steps.append({
             'obj_idx':           obj_idx,
             'obj_name':          obj_name,
-            # Positions are converted from bin-env local to MPPI-scene local frame
-            # via _bin_to_mppi_local() so they match sim.get_object_pos() directly.
-            'coordinate_frame':  'isaaclab_local',
-            'start_pos':         _bin_to_mppi_local(start_pos),
+            'coordinate_frame':  'bin',
+            'start_pos':         start_pos,
             'start_quat':        start_quat,
-            'end_pos':           _bin_to_mppi_local(end_pos),
+            'end_pos':           end_pos,
             'end_quat':          end_quat,
-            'target_start_pos':  _bin_to_mppi_local(target_start_pos),
+            'target_start_pos':  target_start_pos,
             'target_start_quat': target_start_quat,
-            'target_end_pos':    _bin_to_mppi_local(target_end_pos),
+            'target_end_pos':    target_end_pos,
             'target_end_quat':   target_end_quat,
         })
 
@@ -153,6 +151,7 @@ def save_solution(path: str, plan: list[dict], initial_state: dict,
     ]
 
     data = {
+        'coordinate_frame': 'bin',
         'env_config': {
             'BIN_W': BIN_W, 'BIN_D': BIN_D, 'BIN_H': BIN_H,
             'WALL_T': wt, 'OBJ_SIZE': OBJ_SIZE, 'OBJ_H': OBJ_H,
