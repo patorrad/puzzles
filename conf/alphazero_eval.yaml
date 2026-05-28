@@ -1,0 +1,59 @@
+defaults:
+  - simulator: isaaclab
+  - reward: default
+  - _self_
+
+# Environment knobs — should match the trained checkpoint's env config
+n_obstacles: 7
+bin_size: null
+bin_size_factor: 3
+stackable: false
+difficult_spawn: false
+friction: 1.0
+obj_size: 0.05
+n_z_levels: 1
+target_z_level: null
+force_obstacle_on_target: false
+push_steps: 256
+substeps: 4
+wall_thickness: 0.25
+parallel_envs: 8
+seed: 0
+debug: false
+viewer: headless
+
+# Eval
+checkpoint: outputs/alphazero/alphazero_latest.pt
+n_episodes: 64
+device: cpu
+mode: all   # one of: self_play | vs_random_stacker | vs_random_solver | all
+
+# Set view=true to open the IsaacLab viewer and watch episodes play out.
+# When enabled:
+#   - viewer is forced to 'always'
+#   - parallel_envs is forced to 1 (one episode at a time)
+#   - rendering is enabled only while chosen actions execute (not during MCTS)
+#   - the script pauses between episodes for input
+# Reduce n_episodes when using view (e.g. 4) to keep it interactive.
+view: false
+pause_between_eps: true   # ignored when view=false
+
+selfplay:
+  n_simulations_solver: 50
+  n_simulations_stacker: 50
+  max_depth: 10
+  temperature_init: 1.0e-3
+  temperature_final: 1.0e-3
+  temperature_decay_after: 0
+  c_puct: 1.5
+  dirichlet_alpha: 0.3
+  dirichlet_eps: 0.0
+  settle_steps: 10
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  job_logging:
+    root:
+      level: WARNING

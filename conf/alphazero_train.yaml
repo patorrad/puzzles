@@ -1,0 +1,57 @@
+defaults:
+  - simulator: isaaclab
+  - reward: default
+  - _self_
+
+# Environment knobs (passed to build_env)
+n_obstacles: 7
+bin_size: null
+bin_size_factor: 3
+stackable: false
+difficult_spawn: false
+friction: 1.0
+obj_size: 0.05
+n_z_levels: 1
+target_z_level: null
+force_obstacle_on_target: false
+push_steps: 256
+substeps: 4
+wall_thickness: 0.25
+parallel_envs: 1
+seed: 0
+debug: false
+viewer: headless
+
+# Training
+n_iterations: 100
+episodes_per_iter: 8
+train_steps_per_iter: 100
+batch_size: 128
+buffer_size: 50000
+lr: 1.0e-3
+weight_decay: 1.0e-4
+checkpoint_every: 25
+output_dir: outputs/alphazero
+device: cpu
+use_wandb: true
+log_video: true   # capture a self-play replay video at every checkpoint and upload to wandb (isaaclab only)
+
+selfplay:
+  n_simulations_solver: 25
+  n_simulations_stacker: 25
+  max_depth: 10
+  temperature_init: 1.0
+  temperature_final: 1.0e-3
+  temperature_decay_after: 4
+  c_puct: 1.5
+  dirichlet_alpha: 0.3
+  dirichlet_eps: 0.25
+  settle_steps: 10
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  job_logging:
+    root:
+      level: WARNING

@@ -545,6 +545,9 @@ class BinEnvIsaacLab(SimulatorEnv):
         """
         n = len(env_ids)
         pose_buf = self._pose_buf.get(obj) if n == 1 else None
+        # _pose_buf keys are the kinematic pushers; PhysX rejects velocity
+        # writes on kinematic bodies, so skip them here and in the slow path.
+        is_kinematic = obj in self._pose_buf
         if pose_buf is not None:
             # Fast path: reuse pre-allocated buffers (n=1, pusher hot loop)
             # Quat is pre-filled with _IDENTITY_QUAT at build time — no write needed.
@@ -554,7 +557,6 @@ class BinEnvIsaacLab(SimulatorEnv):
             pose_buf[0, 1] = pos_local[1] + oy
             pose_buf[0, 2] = pos_local[2]
             obj.write_root_pose_to_sim(pose_buf, env_ids=env_ids)
-            obj.write_root_velocity_to_sim(self._vel_buf[obj], env_ids=env_ids)
         else:
             pos_world = torch.zeros(n, 3, device=self.device)
             for i, ei in enumerate(env_ids.tolist()):
@@ -564,8 +566,9 @@ class BinEnvIsaacLab(SimulatorEnv):
                     .unsqueeze(0).expand(n, -1))
             pose = torch.cat([pos_world, quat], dim=-1)
             obj.write_root_pose_to_sim(pose, env_ids=env_ids)
-            vel_zero = torch.zeros(n, 6, device=self.device)
-            obj.write_root_velocity_to_sim(vel_zero, env_ids=env_ids)
+            if not is_kinematic:
+                vel_zero = torch.zeros(n, 6, device=self.device)
+                obj.write_root_velocity_to_sim(vel_zero, env_ids=env_ids)
 
     def _park_pushers(self, env_ids: torch.Tensor, env_idx: int | None = None):
         """Park both pusher blades at the safe position for the given envs."""
@@ -711,11 +714,10 @@ class BinEnvIsaacLab(SimulatorEnv):
         # obs_buf[:, :, 7:] stays zero (pre-zeroed at alloc time)
         self.obstacle_collection.write_object_state_to_sim(obs_buf, env_ids=env_ids)
 
-        # Pushers — park poses pre-built per env, no Python loop
+        # Pushers — park poses pre-built per env, no Python loop.
+        # Pushers are kinematic; PhysX rejects velocity writes on them.
         self.pusher_ns_obj.write_root_pose_to_sim(self._batch_park_pose_ns[:k], env_ids=env_ids)
-        self.pusher_ns_obj.write_root_velocity_to_sim(self._batch_vel_zero[:k], env_ids=env_ids)
         self.pusher_ew_obj.write_root_pose_to_sim(self._batch_park_pose_ew[:k], env_ids=env_ids)
-        self.pusher_ew_obj.write_root_velocity_to_sim(self._batch_vel_zero[:k], env_ids=env_ids)
 
     def get_state(self, env_idx: int = 0) -> dict:
         """Public interface: get state from the given env slot."""

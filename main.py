@@ -351,6 +351,25 @@ def main(cfg: DictConfig) -> None:
         plan = planner.plan(initial_state, verbose=True,
                             pause_before_verify=cfg.pause_before_verify)
 
+    elif cfg.planner.name == 'alphazero':
+        from alphazero.pusher import AlphaZeroPusher
+        logger.info('Running AlphaZero planner (%d sims/move, checkpoint=%s)...',
+                    cfg.planner.n_simulations, cfg.planner.checkpoint)
+        planner = AlphaZeroPusher(
+            env=env,
+            solver_net_path=cfg.planner.checkpoint,
+            n_simulations=cfg.planner.n_simulations,
+            max_depth=cfg.planner.max_depth,
+            c_puct=cfg.planner.c_puct,
+            temperature=cfg.planner.temperature,
+            seed=cfg.seed,
+            verify_threshold=cfg.verify_threshold,
+            min_verify_envs=cfg.min_verify_envs,
+            verify_push_steps=cfg.verify_push_steps,
+        )
+        plan = planner.plan(initial_state, verbose=True,
+                            pause_before_verify=cfg.pause_before_verify)
+
     else:  # rrt
         logger.info('Running RRT (%d iterations)...', cfg.planner.max_iter)
         planner = RRTPusher(
