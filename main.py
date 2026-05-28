@@ -182,6 +182,7 @@ def save_solution(path: str, plan: list[dict], initial_state: dict,
 
 def _do_replay(cfg: DictConfig):
     """Load plan from file and replay with viewer. Called in a fresh process."""
+    from replay import run_replay
     with open(cfg.replay_file) as f:
         data = json.load(f)
 
@@ -192,35 +193,8 @@ def _do_replay(cfg: DictConfig):
         'obstacle_pos':  torch.tensor(data['initial_state']['obstacle_pos']),
         'obstacle_quat': torch.tensor(data['initial_state']['obstacle_quat']),
     }
-
     env = build_env(cfg, n_envs=1, viewer_mode='always')
-    env.set_state(initial_state)
-    if env.show_viewer:
-        input('Press Enter to start replay...')
-
-    done = False
-    for step_i, action in enumerate(plan):
-        atype = action['action_type']
-        logger.info('  Step %d/%d: [%s] obj %s pos %s z=%.3f',
-                    step_i + 1, len(plan), atype, action["obj_idx"],
-                    torch.round(action["push_pos"], decimals=3), action["push_z"])
-        if atype == 'push_n':
-            _, reward, done = env.execute_ns_push(action['push_pos'], action['push_z'])
-        elif atype == 'pull_s':
-            _, reward, done = env.execute_ns_pull(action['push_pos'], action['push_z'])
-        elif atype == 'push_e':
-            _, reward, done = env.execute_ew_push(action['push_pos'], action['push_z'], direction=+1)
-        else:
-            _, reward, done = env.execute_ew_push(action['push_pos'], action['push_z'], direction=-1)
-        logger.info('    -> reward=%.3f, done=%s', reward, done)
-        if done:
-            logger.info('  Target escaped the bin!')
-            break
-
-    if not done:
-        logger.info('  Plan executed (target may not have fully escaped).')
-    if env.show_viewer:
-        input('Press Enter to close viewer...')
+    run_replay(env, plan, initial_state)
 
 
 def _launch_replay(plan, initial_state, cfg: DictConfig):

@@ -356,8 +356,13 @@ class BinEnvIsaacLab(SimulatorEnv):
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.5, 0.0)),
         )
 
-        # Ground plane (one shared plane under all envs)
-        sim_utils.GroundPlaneCfg().func("/World/GroundPlane", sim_utils.GroundPlaneCfg())
+        # Ground plane — large kinematic box replaces GroundPlaneCfg whose
+        # USD asset has a baked-in grid shader that can't be suppressed.
+        ground_cfg = self._make_box_cfg(
+            (200.0, 200.0, 0.01),
+            mass=1.0, kinematic=True, friction=fr, color=(0.4, 0.4, 0.4)
+        )
+        self._spawn_prim("/World/GroundPlane", ground_cfg, pos=(0.0, 0.0, -0.005))
 
         for ei in range(self.n_envs):
             ox = self.env_origins[ei, 0].item()

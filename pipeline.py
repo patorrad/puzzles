@@ -88,14 +88,20 @@ def _puzzle_worker(cfg: DictConfig, scenarios: list, out_dir: Path, q) -> None:
     skip IsaacLab teardown — that would hang or corrupt GPU state anyway.
     """
     import os
+    record_video = cfg.get('record_video', False) and cfg.simulator.name == 'isaaclab'
     planner_viewer_mode = 'always' if cfg.get('show_mpc_planner_viewer', False) else 'headless'
-    if cfg.simulator.name == 'isaaclab' and planner_viewer_mode == 'headless':
-        os.environ['ISAACLAB_HEADLESS'] = '1'
+    if cfg.simulator.name == 'isaaclab':
+        if planner_viewer_mode == 'headless':
+            os.environ['ISAACLAB_HEADLESS'] = '1'
+        if record_video:
+            os.environ['ISAACLAB_ENABLE_CAMERAS'] = '1'
 
     from simulators import build_env
     from main import save_solution
 
     out_dir = Path(out_dir)
+    if record_video:
+        (out_dir / 'videos').mkdir(parents=True, exist_ok=True)
     env = build_env(cfg, n_envs=cfg.parallel_envs,
                     viewer_mode=planner_viewer_mode)
 
@@ -103,6 +109,7 @@ def _puzzle_worker(cfg: DictConfig, scenarios: list, out_dir: Path, q) -> None:
     successful_names: list[str] = []
     force_traces_map: dict[str, list] = {}
     plans_map: dict[str, list] = {}
+    videos_map: dict[str, str] = {}
 
     for i, (scenario_name, initial_state) in enumerate(scenarios):
         seed = (cfg.seed + i) if cfg.seed is not None else i
@@ -116,6 +123,17 @@ def _puzzle_worker(cfg: DictConfig, scenarios: list, out_dir: Path, q) -> None:
 
             solution_path = out_dir / 'solutions' / f'{scenario_name}.json'
             save_solution(str(solution_path), plan, initial_state, cfg, env)
+
+            if record_video:
+                video_path = str(out_dir / 'videos' / f'{scenario_name}.mp4')
+                try:
+                    recorded = env.record_replay(plan, initial_state, video_path)
+                    if recorded is not None:
+                        videos_map[scenario_name] = recorded
+                    else:
+                        print(f'  [pipeline] record_replay returned None for {scenario_name}')
+                except Exception as e:
+                    print(f'  [pipeline] record_replay failed for {scenario_name}: {e}')
 
             successful_names.append(scenario_name)
             force_traces_map[scenario_name] = force_traces
@@ -136,6 +154,7 @@ def _puzzle_worker(cfg: DictConfig, scenarios: list, out_dir: Path, q) -> None:
         'successful': successful_names,
         'force_traces': force_traces_map,
         'plans': {k: _detach_plan(v) for k, v in plans_map.items()},
+        'videos': videos_map,
     })
 
 
@@ -264,7 +283,8 @@ def _plan_scenario(env, cfg: DictConfig, scenario_idx: int, scenario_name: str,
 
 def _log_puzzle_wandb(result: PuzzleResult, initial_state, bin_size: float, obj_size: float,
                       wall_thickness: float, force_threshold: float | None,
-                      plan, force_traces, all_results: list[PuzzleResult], step: int):
+                      plan, force_traces, all_results: list[PuzzleResult], step: int,
+                      video_path: str | None = None):
     """Log per-scenario puzzle metrics to WandB."""
     import matplotlib.pyplot as plt
 
@@ -333,6 +353,12 @@ def _log_puzzle_wandb(result: PuzzleResult, initial_state, bin_size: float, obj_
         fig.tight_layout()
         wandb.log({'puzzles/contact_force': wandb.Image(fig)}, step=step)
         plt.close(fig)
+
+    if video_path is not None:
+        try:
+            wandb.log({'puzzles/replay_video': wandb.Video(video_path, fps=30, format='mp4')}, step=step)
+        except Exception as e:
+            print(f'  [pipeline] wandb video log failed for {result.scenario_name}: {e}')
 
 
 # ---------------------------------------------------------------------------
@@ -663,7 +689,7 @@ def main(cfg: DictConfig) -> None:
 
             run_id = wandb.run.id
             out_dir = Path(cfg.output_dir) / run_id
-            for subdir in ('scenarios', 'solutions', 'isaaclabmpc_results', 'telemetry', 'logs'):
+            for subdir in ('scenarios', 'solutions', 'isaaclabmpc_results', 'telemetry', 'logs', 'videos'):
                 (out_dir / subdir).mkdir(parents=True, exist_ok=True)
             print(f'\nOutput directory: {out_dir}')
 
@@ -722,6 +748,7 @@ def main(cfg: DictConfig) -> None:
                         result, initial_state,
                         bin_size, obj_size, wall_thickness, force_threshold,
                         plan, force_traces, puzzle_results, result.scenario_idx,
+                        video_path=worker_result['videos'].get(result.scenario_name),
                     )
 
     elif cfg.get('resume', False):
@@ -788,11 +815,8 @@ def main(cfg: DictConfig) -> None:
 
         run_id = wandb.run.id
         out_dir = Path(cfg.output_dir) / run_id
-        (out_dir / 'scenarios').mkdir(parents=True, exist_ok=True)
-        (out_dir / 'solutions').mkdir(parents=True, exist_ok=True)
-        (out_dir / 'isaaclabmpc_results').mkdir(parents=True, exist_ok=True)
-        (out_dir / 'telemetry').mkdir(parents=True, exist_ok=True)
-        (out_dir / 'logs').mkdir(parents=True, exist_ok=True)
+        for subdir in ('scenarios', 'solutions', 'isaaclabmpc_results', 'telemetry', 'logs', 'videos'):
+            (out_dir / subdir).mkdir(parents=True, exist_ok=True)
         print(f'\nOutput directory: {out_dir}')
 
         latest_link = Path(cfg.output_dir) / 'latest'
@@ -869,6 +893,7 @@ def main(cfg: DictConfig) -> None:
                     result, initial_state,
                     bin_size, obj_size, wall_thickness, force_threshold,
                     plan, force_traces, puzzle_results, result.scenario_idx,
+                    video_path=worker_result['videos'].get(scenario_name),
                 )
 
     n_puzzle_success = len(successful)
