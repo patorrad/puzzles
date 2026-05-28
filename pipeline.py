@@ -391,6 +391,22 @@ def _check_port_free(port: int) -> None:
                  f'Kill the stale planner with: kill {pids}')
 
 
+def _wait_for_planner_server(addr: str = "tcp://localhost:4242", max_wait_s: int = 120) -> None:
+    """Poll until the zerorpc planner server responds to test()."""
+    import zerorpc as _zerorpc
+    deadline = time.time() + max_wait_s
+    while time.time() < deadline:
+        try:
+            c = _zerorpc.Client(timeout=5, heartbeat=None)
+            c.connect(addr)
+            c.test("pipeline-ping")
+            c.close()
+            return
+        except Exception:
+            time.sleep(2)
+    raise TimeoutError(f"Planner server at {addr} did not become ready in {max_wait_s}s")
+
+
 def _run_isaaclabmpc(scenario_name: str, scenario_yaml: Path, solution_json: Path,
                      out_dir: Path, cfg: DictConfig) -> MpcResult:
     """Launch planner.py + world.py subprocesses. Returns MpcResult."""
@@ -510,6 +526,185 @@ def _run_isaaclabmpc(scenario_name: str, scenario_yaml: Path, solution_json: Pat
           f'{mpc_result.steps_completed}/{mpc_result.total_steps} steps '
           f'in {mpc_result.elapsed_time_s:.1f}s')
     return mpc_result
+
+
+def _run_isaaclabmpc_pull_scenario(scenario_name: str, out_dir: Path,
+                                    cfg: DictConfig) -> tuple['MpcResult', dict | None]:
+    """Server mode: start planner (--defer_solution), query scenario info, run puzzle
+    planning, inject solution via reset_episode(), then run world.py."""
+    import zerorpc as _zerorpc
+    import torch
+
+    ilab_dir       = Path(cfg.isaaclabmpc_dir)
+    result_json    = (out_dir / 'isaaclabmpc_results' / f'{scenario_name}.json').resolve()
+    telemetry_json = (out_dir / 'telemetry' / f'{scenario_name}_planner.json').resolve()
+    planner_log    = out_dir / 'logs' / f'{scenario_name}_planner.txt'
+    world_log      = out_dir / 'logs' / f'{scenario_name}_world.txt'
+
+    python              = sys.executable
+    show_planner_viewer = cfg.get('show_mpc_planner_viewer', False)
+    show_world_viewer   = cfg.get('show_mpc_world_viewer', False)
+
+    # ── 1. Launch planner with --defer_solution ──────────────────────────────
+    planner_cmd = [
+        python, str(ilab_dir / 'planner.py'),
+        '--defer_solution',
+        '--telemetry_path', str(telemetry_json),
+    ]
+    if not show_planner_viewer:
+        planner_cmd.append('--headless')
+
+    _check_port_free(4242)
+    print(f'\n[MPC-server] {scenario_name}: launching planner (defer_solution) …')
+    print(f'[MPC-server] {scenario_name}: cmd: {" ".join(planner_cmd)}')
+    planner_proc = subprocess.Popen(
+        planner_cmd,
+        cwd=str(ilab_dir.parent.parent),
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, bufsize=1,
+    )
+    _stream_output(planner_proc.stdout, planner_log, f'[{scenario_name}/planner] ')
+
+    # ── 2. Wait for server to be ready ───────────────────────────────────────
+    try:
+        _wait_for_planner_server("tcp://localhost:4242", max_wait_s=120)
+    except TimeoutError as e:
+        print(f'[MPC-server] {scenario_name}: ERROR — {e}')
+        planner_proc.kill()
+        return MpcResult(scenario_name=scenario_name, success=False,
+                         steps_completed=0, total_steps=0, elapsed_time_s=0.0), None
+
+    # ── 3. Query scenario info ────────────────────────────────────────────────
+    client = _zerorpc.Client(timeout=30, heartbeat=None)
+    client.connect("tcp://localhost:4242")
+    try:
+        scenario_info = json.loads(client.get_scenario_info())
+    except Exception as e:
+        print(f'[MPC-server] {scenario_name}: get_scenario_info failed: {e}')
+        client.close()
+        planner_proc.kill()
+        return MpcResult(scenario_name=scenario_name, success=False,
+                         steps_completed=0, total_steps=0, elapsed_time_s=0.0), None
+
+    n_obs = len(scenario_info['initial_state']['obstacles'])
+    print(f'[MPC-server] {scenario_name}: scenario received ({n_obs} obstacles)')
+
+    initial_state = {
+        'target_pos':    torch.tensor(scenario_info['initial_state']['target_pos']),
+        'target_quat':   torch.tensor(scenario_info['initial_state']['target_quat']),
+        'obstacle_pos':  torch.tensor([o['pos']  for o in scenario_info['initial_state']['obstacles']]),
+        'obstacle_quat': torch.tensor([o['quat'] for o in scenario_info['initial_state']['obstacles']]),
+    }
+
+    # ── 4. Patch cfg and run puzzle planning ─────────────────────────────────
+    env_cfg = scenario_info['env_config']
+    with open_dict(cfg):
+        cfg.n_obstacles    = env_cfg['n_obstacles']
+        cfg.bin_size       = env_cfg['bin_size']
+        cfg.wall_thickness = env_cfg['wall_thickness']
+        cfg.friction       = env_cfg['friction']
+
+    print(f'[MPC-server] {scenario_name}: running puzzle planning '
+          f'(n_obstacles={cfg.n_obstacles}, bin_size={cfg.bin_size}) …')
+    ctx  = multiprocessing.get_context('spawn')
+    pq   = ctx.Queue()
+    proc = ctx.Process(
+        target=_puzzle_worker,
+        args=(cfg, [(scenario_name, initial_state)], out_dir, pq),
+    )
+    proc.start()
+
+    puzzle_timeout = cfg.get('puzzle_timeout_s', None)
+    worker_result  = None
+    try:
+        worker_result = pq.get(timeout=puzzle_timeout)
+    except queue.Empty:
+        print(f'[MPC-server] {scenario_name}: puzzle planning timed out')
+    try:
+        proc.kill()
+    except OSError:
+        pass
+    proc.join(timeout=5)
+
+    solution_path = out_dir / 'solutions' / f'{scenario_name}.json'
+    if worker_result is None or not solution_path.exists():
+        print(f'[MPC-server] {scenario_name}: puzzle planning failed — aborting MPC')
+        client.close()
+        planner_proc.kill()
+        return MpcResult(scenario_name=scenario_name, success=False,
+                         steps_completed=0, total_steps=0, elapsed_time_s=0.0), initial_state
+
+    for pr in worker_result.get('puzzle_results', []):
+        print(f'[MPC-server] puzzle result: success={pr.success} plan_len={pr.plan_length}')
+
+    # ── 5. Inject solution into planner ──────────────────────────────────────
+    with open(solution_path) as f:
+        solution_data = json.load(f)
+    steps_json = json.dumps(solution_data['steps'])
+    print(f'[MPC-server] {scenario_name}: injecting {len(solution_data["steps"])} '
+          f'steps via reset_episode …')
+    try:
+        client.reset_episode(steps_json)
+    except Exception as e:
+        print(f'[MPC-server] {scenario_name}: reset_episode failed: {e}')
+    client.close()
+
+    # ── 6. Launch world.py ───────────────────────────────────────────────────
+    world_cmd = [
+        python, str(ilab_dir / 'world.py'),
+        '--n_steps', str(cfg.isaaclabmpc_n_steps),
+    ]
+    if not show_world_viewer:
+        world_cmd.append('--headless')
+
+    print(f'[MPC-server] {scenario_name}: launching world …')
+    world_proc = subprocess.Popen(
+        world_cmd,
+        cwd=str(ilab_dir.parent.parent),
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, bufsize=1,
+    )
+    _stream_output(world_proc.stdout, world_log, f'[{scenario_name}/world] ')
+
+    # ── 7. Wait for completion ───────────────────────────────────────────────
+    timed_out = False
+    try:
+        world_proc.wait(timeout=cfg.isaaclabmpc_timeout_s)
+    except subprocess.TimeoutExpired:
+        print(f'[MPC-server] {scenario_name}: TIMEOUT after {cfg.isaaclabmpc_timeout_s}s')
+        world_proc.kill()
+        timed_out = True
+    finally:
+        planner_proc.send_signal(signal.SIGTERM)
+        try:
+            planner_proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            planner_proc.kill()
+
+    result_data = {}
+    if result_json.exists():
+        with open(result_json) as f:
+            result_data = json.load(f)
+
+    telemetry_data = {}
+    if telemetry_json.exists():
+        with open(telemetry_json) as f:
+            telemetry_data = json.load(f)
+
+    mpc_result = MpcResult(
+        scenario_name=scenario_name,
+        success=result_data.get('success', False) and not timed_out,
+        steps_completed=result_data.get('steps_completed', 0),
+        total_steps=result_data.get('total_steps', 0),
+        elapsed_time_s=result_data.get('elapsed_time_s', 0.0),
+        ee_trajectory=result_data.get('ee_trajectory'),
+        block_positions_final=result_data.get('block_positions_final'),
+        step_completion_events=result_data.get('step_completion_events'),
+        mppi_cost_history=telemetry_data.get('mppi_cost_history'),
+    )
+    status = 'SUCCESS' if mpc_result.success else ('TIMEOUT' if timed_out else 'RUNNING/UNKNOWN')
+    print(f'[MPC-server] {scenario_name}: {status}')
+    return mpc_result, initial_state
 
 
 def _log_mpc_wandb(result: MpcResult, step: int, initial_state=None,
@@ -793,6 +988,59 @@ def main(cfg: DictConfig) -> None:
         (out_dir / 'isaaclabmpc_results').mkdir(parents=True, exist_ok=True)
         (out_dir / 'telemetry').mkdir(parents=True, exist_ok=True)
         (out_dir / 'logs').mkdir(parents=True, exist_ok=True)
+
+    elif cfg.get('scenario_source') == 'server':
+        # ------------------------------------------------------------------
+        # Server mode: pull env setup from the running planner, run puzzle
+        # planning, inject solution, run MPC. No scenario YAML required.
+        # Usage: python pipeline.py --config-name=pipeline scenario_source=server
+        # ------------------------------------------------------------------
+        wandb.init(
+            project=cfg.wandb_project,
+            entity=cfg.wandb_entity if cfg.wandb_entity else None,
+            name=cfg.wandb_run_name if cfg.wandb_run_name else None,
+            config=OmegaConf.to_container(cfg, resolve=True),
+        )
+        while wandb.run is None:
+            time.sleep(1)
+
+        run_id  = wandb.run.id
+        out_dir = Path(cfg.output_dir) / run_id
+        for subdir in ('solutions', 'isaaclabmpc_results', 'telemetry', 'logs'):
+            (out_dir / subdir).mkdir(parents=True, exist_ok=True)
+        print(f'\nOutput directory: {out_dir}')
+
+        latest_link = Path(cfg.output_dir) / 'latest'
+        if latest_link.is_symlink():
+            latest_link.unlink()
+        latest_link.symlink_to(out_dir.resolve())
+
+        scenario_name = cfg.get('server_scenario_name', 'server_scenario')
+
+        print('\n' + '=' * 60)
+        print('Server mode: query scenario from planner, plan, inject, MPC')
+        print('=' * 60)
+
+        mpc_result, initial_state = _run_isaaclabmpc_pull_scenario(
+            scenario_name, out_dir, cfg
+        )
+
+        _log_mpc_wandb(
+            mpc_result, 0,
+            initial_state=initial_state,
+            bin_size=bin_size,
+            obj_size=obj_size,
+            wall_thickness=wall_thickness,
+        )
+
+        wandb.run.summary.update({
+            'n_scenarios':              1,
+            'n_puzzle_success':         1 if initial_state is not None else 0,
+            'n_mpc_success':            int(mpc_result.success),
+            'isaaclabmpc_success_rate': int(mpc_result.success),
+        })
+        wandb.finish()
+        return
 
     else:
         # ------------------------------------------------------------------
