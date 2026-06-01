@@ -14,7 +14,7 @@ import torch.nn.functional as F
 
 
 class _Trunk(nn.Module):
-    def __init__(self, in_dim: int, hidden: int = 128):
+    def __init__(self, in_dim: int, hidden: int = 256):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(in_dim, hidden), nn.ReLU(),

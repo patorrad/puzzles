@@ -8,7 +8,7 @@ defaults:
 # Environment
 n_obstacles: 2
 bin_size: null             # null = auto-scale with n_obstacles; set a float (e.g. 0.5) for a fixed size
-bin_size_factor: 3      # auto bin_size = (n_obstacles+1) * OBJ_SIZE * this factor (ignored if bin_size is set)
+bin_size_factor: 1      # auto bin_size = (n_obstacles+1) * OBJ_SIZE * this factor (ignored if bin_size is set)
 stackable: false
 difficult_spawn: false
 debug: false

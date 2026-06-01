@@ -6,7 +6,7 @@ defaults:
 # Environment knobs (passed to build_env)
 n_obstacles: 7
 bin_size: null
-bin_size_factor: 3
+bin_size_factor: 1
 stackable: false
 difficult_spawn: false
 friction: 1.0
@@ -24,7 +24,7 @@ viewer: headless
 
 # Training
 n_iterations: 100
-episodes_per_iter: 8
+episodes_per_iter: 32
 train_steps_per_iter: 100
 batch_size: 128
 buffer_size: 50000
@@ -37,8 +37,8 @@ use_wandb: true
 log_video: true   # capture a self-play replay video at every checkpoint and upload to wandb (isaaclab only)
 
 selfplay:
-  n_simulations_solver: 25
-  n_simulations_stacker: 25
+  n_simulations_solver: 100
+  n_simulations_stacker: 100
   max_depth: 10
   temperature_init: 1.0
   temperature_final: 1.0e-3

@@ -3,7 +3,7 @@ defaults:
   - override simulator: isaaclab
   - _self_
 # Environment
-n_obstacles: 20
+n_obstacles: 7
 parallel_envs: 16
 difficult_spawn: true
 

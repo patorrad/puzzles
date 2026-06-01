@@ -60,6 +60,17 @@ class AlphaZeroPusher:
                 env_spec.Gx, env_spec.Gy, env_spec.Z,
                 self.spec.Gx, self.spec.Gy, self.spec.Z)
 
+        # Derive the n_obstacles the checkpoint was trained with and fail fast
+        # if it doesn't match the env, rather than crashing inside the network.
+        ckpt_n_z = len(self.spec.z_levels) or 1
+        ckpt_n_obs = ckpt['solver_n_actions'] // (4 * ckpt_n_z) - 1
+        if ckpt_n_obs != env.n_obstacles:
+            raise ValueError(
+                f'Checkpoint {solver_net_path!r} was trained with n_obstacles={ckpt_n_obs} '
+                f'but the environment has n_obstacles={env.n_obstacles}. '
+                f'Pass n_obstacles={ckpt_n_obs} to benchmark.py.'
+            )
+
     def plan(self, initial_state: dict | None = None,
              verbose: bool = True, pause_before_verify: bool = False
              ) -> list[dict] | None:
@@ -112,7 +123,17 @@ class AlphaZeroPusher:
 
         if verbose:
             print(f'  AlphaZero: plan verified ({successes}/{n_tries}, avg_reward={avg_reward:.3f}).')
+        self._last_verify = (successes, avg_reward, n_tries)
         return plan
+
+    def verify(self, plan: list[dict], initial_state: dict,
+               verbose: bool = True) -> tuple[int, float, float, bool]:
+        # Return the cached result from plan()'s internal verification rather
+        # than re-running a second stochastic pass whose results could diverge.
+        successes, avg_reward, n_tries = self._last_verify
+        rate = successes / n_tries
+        passed = rate >= self.verify_threshold
+        return successes, avg_reward, rate, passed
 
 
 class _NullCtx:

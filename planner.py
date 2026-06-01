@@ -255,6 +255,20 @@ class _PlannerBase:
     def from_cfg(cls, env: SimulatorEnv, cfg, seed: int) -> '_PlannerBase':
         """Instantiate the correct planner from a Hydra config."""
         aw = cfg.planner.get('action_weights', None)
+        if cfg.planner.name == 'alphazero':
+            from alphazero.pusher import AlphaZeroPusher
+            return AlphaZeroPusher(
+                env=env,
+                solver_net_path=cfg.planner.checkpoint,
+                n_simulations=cfg.planner.n_simulations,
+                max_depth=cfg.planner.max_depth,
+                c_puct=cfg.planner.c_puct,
+                temperature=cfg.planner.temperature,
+                seed=seed,
+                verify_threshold=cfg.verify_threshold,
+                min_verify_envs=cfg.min_verify_envs,
+                verify_push_steps=cfg.get('verify_push_steps', None),
+            )
         if cfg.planner.name == 'mcts':
             return MCTSPusher(
                 env=env,
