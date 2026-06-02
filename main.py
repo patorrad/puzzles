@@ -50,24 +50,24 @@ logger = logging.getLogger(__name__)
 # Replay helpers
 # ---------------------------------------------------------------------------
 
-def _bin_to_mppi_local(pos: list) -> list:
-    """Constant linear transform: bin frame → Isaac Lab world frame.
+def _bin_to_target_frame(pos: list, target_pos: list) -> list:
+    """Convert a bin-frame position to target-relative frame.
 
-    R = [[0,1,0],[1,0,0],[0,0,1]]  (swap X↔Y)
-    t = [0.10, 0.10, 0.810]        (near-robot offset + table surface height)
+    Both puzzles and MPC now use x=north-south/forward, y=east-west/lateral,
+    so this is a pure subtraction — no axis swap needed.
 
-    All blocks land at MPPI Y ∈ [0.10, bin_size+0.10] — entirely on the
-    positive-Y side, clear of the robot stand footprint at |Y| < 0.10.
-    Matches scene.py _bin_to_mppi_local() — keep in sync.
+    At deploy time: abs_mpc_pos = observed_target_pos + offset.
     """
-    x, y, z = pos
-    return [y + 0.10, x + 0.10, z + 0.810]
+    bx, by, bz = pos
+    tx, ty, tz = target_pos
+    return [bx - tx, by - ty, bz - tz]
 
 
 def _simulate_plan_steps(env, plan: list[dict], initial_state: dict) -> list[dict]:
     steps = []
     state = initial_state
     env.set_state(state)
+    target_initial = initial_state['target_pos'].tolist()
 
     for action in plan:
         obj_idx  = int(action['obj_idx'])
@@ -97,14 +97,14 @@ def _simulate_plan_steps(env, plan: list[dict], initial_state: dict) -> list[dic
         steps.append({
             'obj_idx':           obj_idx,
             'obj_name':          obj_name,
-            'coordinate_frame':  'bin',
-            'start_pos':         start_pos,
+            'coordinate_frame':  'target',
+            'start_pos':         _bin_to_target_frame(start_pos, target_initial),
             'start_quat':        start_quat,
-            'end_pos':           end_pos,
+            'end_pos':           _bin_to_target_frame(end_pos, target_initial),
             'end_quat':          end_quat,
-            'target_start_pos':  target_start_pos,
+            'target_start_pos':  _bin_to_target_frame(target_start_pos, target_initial),
             'target_start_quat': target_start_quat,
-            'target_end_pos':    target_end_pos,
+            'target_end_pos':    _bin_to_target_frame(target_end_pos, target_initial),
             'target_end_quat':   target_end_quat,
         })
 
@@ -140,18 +140,21 @@ def save_solution(path: str, plan: list[dict], initial_state: dict,
                    [0.9, 0.2, 0.2], rho=50.0),
         *[make_actor(f'obstacle_{i}', [OBJ_SIZE]*3, pos.tolist(), [0.3, 0.5, 0.9])
           for i, pos in enumerate(initial_state['obstacle_pos'])],
-        make_actor('floor', [BIN_W+2*wt, BIN_D+2*wt, wt],
-                   [BIN_W/2, BIN_D/2, -wt/2], floor_color, fixed=True),
-        make_actor('wall_north', [BIN_W+2*wt, wt, BIN_H],
-                   [BIN_W/2, BIN_D+wt/2, BIN_H/2], wall_color, fixed=True),
-        make_actor('wall_west',  [wt, BIN_D, BIN_H],
-                   [-wt/2, BIN_D/2, BIN_H/2], wall_color, fixed=True),
-        make_actor('wall_east',  [wt, BIN_D, BIN_H],
-                   [BIN_W+wt/2, BIN_D/2, BIN_H/2], wall_color, fixed=True),
+        # Actor positions in bin-local frame: x=NS/forward, y=EW/lateral
+        make_actor('floor', [BIN_D+2*wt, BIN_W+2*wt, wt],
+                   [BIN_D/2, BIN_W/2, -wt/2], floor_color, fixed=True),
+        make_actor('wall_north', [wt, BIN_W+2*wt, BIN_H],
+                   [BIN_D+wt/2, BIN_W/2, BIN_H/2], wall_color, fixed=True),
+        make_actor('wall_west',  [BIN_D, wt, BIN_H],
+                   [BIN_D/2, -wt/2, BIN_H/2], wall_color, fixed=True),
+        make_actor('wall_east',  [BIN_D, wt, BIN_H],
+                   [BIN_D/2, BIN_W+wt/2, BIN_H/2], wall_color, fixed=True),
     ]
 
     data = {
-        'coordinate_frame': 'bin',
+        # steps use "target" frame (x/y-swapped, target-relative offsets).
+        # initial_state and plan remain in bin frame for _do_replay().
+        'coordinate_frame': 'target',
         'env_config': {
             'BIN_W': BIN_W, 'BIN_D': BIN_D, 'BIN_H': BIN_H,
             'WALL_T': wt, 'OBJ_SIZE': OBJ_SIZE, 'OBJ_H': OBJ_H,

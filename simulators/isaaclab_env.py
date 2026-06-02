@@ -182,8 +182,8 @@ class BinEnvIsaacLab(SimulatorEnv):
         self._post_step_hook = None   # callable invoked after every _step_sim; used by record_replay
         self._force_render   = False  # when True, _step_sim always renders (used by replay)
 
-        _park_y = -(max(self.bin_w, self.bin_d) * 1.5 + 0.1)
-        self._park = [self.bin_w / 2, _park_y, self._OBJ_H]
+        _park_x = -(max(self.bin_w, self.bin_d) * 1.5 + 0.1)
+        self._park = [_park_x, self.bin_w / 2, self._OBJ_H]  # x=NS behind bin, y=EW center
         self.z_levels = [self._OBJ_H + i * self._OBJ_SIZE for i in range(n_z_levels)]
         self.device   = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -488,14 +488,19 @@ class BinEnvIsaacLab(SimulatorEnv):
         return eye, target
 
     def _local_to_world(self, pos_local: list, env_idx: int) -> tuple:
-        """Convert a bin-local 3-D position to world coordinates."""
+        """Convert a bin-local 3-D position to world coordinates.
+
+        Bin-local: x=NS/forward, y=EW/lateral.
+        World (Isaac Lab): x=EW, y=NS.
+        """
         ox, oy = self._env_origins_xy[env_idx]
-        return (pos_local[0] + ox, pos_local[1] + oy, pos_local[2])
+        return (pos_local[1] + ox, pos_local[0] + oy, pos_local[2])
 
     def _world_to_local(self, pos_world: torch.Tensor, env_idx: int) -> torch.Tensor:
-        """Subtract the env origin so positions are in bin-local frame."""
+        """Subtract env origin and swap x/y to return bin-local frame (x=NS, y=EW)."""
         origin = self.env_origins[env_idx].to(pos_world.device)
-        return pos_world - origin
+        rel = pos_world - origin   # [EW, NS, z] in world order
+        return torch.stack([rel[1], rel[0], rel[2]])  # → [NS, EW, z]
 
     # ------------------------------------------------------------------
     # Physics step helpers
@@ -555,8 +560,8 @@ class BinEnvIsaacLab(SimulatorEnv):
             # Quat is pre-filled with _IDENTITY_QUAT at build time — no write needed.
             ei = env_idx if env_idx is not None else int(env_ids[0].item())
             ox, oy = self._env_origins_xy[ei]
-            pose_buf[0, 0] = pos_local[0] + ox
-            pose_buf[0, 1] = pos_local[1] + oy
+            pose_buf[0, 0] = pos_local[1] + ox  # world x = EW = bin-local y
+            pose_buf[0, 1] = pos_local[0] + oy  # world y = NS = bin-local x
             pose_buf[0, 2] = pos_local[2]
             obj.write_root_pose_to_sim(pose_buf, env_ids=env_ids)
             obj.write_root_velocity_to_sim(self._vel_buf[obj], env_ids=env_ids)
@@ -675,11 +680,14 @@ class BinEnvIsaacLab(SimulatorEnv):
             # root_quat_w shape: (n_envs, 4), convention (w,x,y,z)
             return obj.data.root_quat_w[env_idx].clone()
 
+        # Obstacles bypass _world_to_local so we apply the swap here:
+        # object_link_pose_w is (n_obs, 7) in world order [EW, NS, z, quat...]
+        raw_obs_world = self.obstacle_collection.data.object_link_pose_w[env_idx, :, :3].clone()
+        raw_obs_rel   = raw_obs_world - self.env_origins[env_idx].to(self.device)  # [EW, NS, z]
         return {
             'target_pos':    _pos(self.target_obj),
             'target_quat':   _quat(self.target_obj),
-            'obstacle_pos':  (self.obstacle_collection.data.object_link_pose_w[env_idx, :, :3].clone()
-                              - self.env_origins[env_idx].to(self.device)),
+            'obstacle_pos':  raw_obs_rel[:, [1, 0, 2]],   # → [NS, EW, z]
             'obstacle_quat': self.obstacle_collection.data.object_link_pose_w[env_idx, :, 3:].clone(),
         }
 
@@ -698,20 +706,20 @@ class BinEnvIsaacLab(SimulatorEnv):
         k = len(states)
         origins = self._origins_xyz[env_ids]           # (k, 3), pure GPU index
 
-        # Target
+        # Target — bin-local [NS, EW, z] → world [EW, NS, z] via column swap
         tgt_pos  = torch.stack([s['target_pos'].to(self.device)  for s in states])  # (k, 3)
         tgt_quat = torch.stack([s['target_quat'].to(self.device) for s in states])  # (k, 4)
         buf = self._batch_tgt_pose_buf[:k]
-        buf[:, :3] = tgt_pos + origins
+        buf[:, :3] = tgt_pos[:, [1, 0, 2]] + origins
         buf[:, 3:]  = tgt_quat
         self.target_obj.write_root_pose_to_sim(buf, env_ids=env_ids)
         self.target_obj.write_root_velocity_to_sim(self._batch_vel_zero[:k], env_ids=env_ids)
 
-        # Obstacles
+        # Obstacles — same [NS, EW, z] → [EW, NS, z] swap
         obs_pos  = torch.stack([s['obstacle_pos'].to(self.device)  for s in states])  # (k, n_obs, 3)
         obs_quat = torch.stack([s['obstacle_quat'].to(self.device) for s in states])  # (k, n_obs, 4)
         obs_buf  = self._batch_obs_state_buf[:k]
-        obs_buf[:, :, :3]  = obs_pos + origins.unsqueeze(1)
+        obs_buf[:, :, :3]  = obs_pos[:, :, [1, 0, 2]] + origins.unsqueeze(1)
         obs_buf[:, :, 3:7] = obs_quat
         # obs_buf[:, :, 7:] stays zero (pre-zeroed at alloc time)
         self.obstacle_collection.write_object_state_to_sim(obs_buf, env_ids=env_ids)
@@ -752,11 +760,12 @@ class BinEnvIsaacLab(SimulatorEnv):
                 return self._get_state(0)
             if env_idx is not None:
                 initial = {
-                    'target_pos':    torch.tensor([self.bin_w/2, self.bin_d/2, self._OBJ_H],
+                    # bin-local: x=NS/forward (bin_d), y=EW/lateral (bin_w)
+                    'target_pos':    torch.tensor([self.bin_d/2, self.bin_w/2, self._OBJ_H],
                                                   device=self.device),
                     'target_quat':   torch.tensor([1., 0., 0., 0.],
                                                   device=self.device),
-                    'obstacle_pos':  torch.tensor([[self.bin_w/2, self.bin_d/2, self._OBJ_H]],
+                    'obstacle_pos':  torch.tensor([[self.bin_d/2, self.bin_w/2, self._OBJ_H]],
                                                   device=self.device).expand(self.n_obstacles, -1),
                     'obstacle_quat': torch.tensor([[1., 0., 0., 0.]],
                                                   device=self.device).expand(self.n_obstacles, -1),
@@ -897,8 +906,9 @@ class BinEnvIsaacLab(SimulatorEnv):
             ends   = torch.tensor([strokes[i][2] for i in idxs], dtype=torch.float32)
             ox     = torch.tensor([self._env_origins_xy[i][0] for i in idxs], dtype=torch.float32)
             oy     = torch.tensor([self._env_origins_xy[i][1] for i in idxs], dtype=torch.float32)
-            pos0   = starts.clone(); pos0[:, 0] += ox; pos0[:, 1] += oy
-            delta  = ends - starts   # bin-local delta; origin cancels in the difference
+            # bin-local [NS, EW, z] → world [EW, NS, z]: swap columns, then add origin
+            pos0   = starts[:, [1, 0, 2]].clone(); pos0[:, 0] += ox; pos0[:, 1] += oy
+            delta  = (ends - starts)[:, [1, 0, 2]]   # swap delta to world frame too
             ids    = torch.tensor(idxs, dtype=torch.long)
             return pos0.to(self.device), delta.to(self.device), ids.to(self.device)
 
@@ -1007,13 +1017,13 @@ class BinEnvIsaacLab(SimulatorEnv):
     # ------------------------------------------------------------------
 
     def _obstacles_dropped(self, state: dict) -> bool:
-        return any(float(state['obstacle_pos'][i][1]) < EXIT_Y
+        return any(float(state['obstacle_pos'][i][0]) < EXIT_Y   # pos[0] = NS/forward
                    for i in range(self.n_obstacles))
 
     def _is_goal(self, state: dict) -> bool:
         if self._obstacles_dropped(state):
             return False
-        return bool(float(state['target_pos'][1]) <= EXIT_Y)
+        return bool(float(state['target_pos'][0]) <= EXIT_Y)     # pos[0] = NS/forward
 
     def step_physics(self) -> None:
         self._step_sim(render=False)

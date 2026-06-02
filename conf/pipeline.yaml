@@ -25,12 +25,12 @@ puzzle_timeout_s: null
 
 # Single-scenario mode: skip generation, run puzzle planning + MPC on one YAML
 # Usage: python pipeline.py --config-name=pipeline scenario_file=conf/scenario/generated/scenario_0000.yaml
-scenario_file: null
+scenario_file: /home/jack/research/puzzles/conf/scenario/cube27.yaml
 
 # Server mode: pull env setup from the running planner instead of a YAML.
 # Usage: python pipeline.py --config-name=pipeline scenario_source=server
-scenario_source: server
-server_scenario_name: server_scenario
+scenario_source: null
+server_scenario_name: null
 
 # Resume mode: skip scenario generation + puzzle planning, run MPC only
 # Usage: python pipeline.py --config-name=pipeline resume=true resume_dir=outputs/<run_id>

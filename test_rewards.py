@@ -62,14 +62,14 @@ def _place_and_settle(env, target_xy, obs_xys):
     return env.get_state(0)
 
 
-def _progress_expected(y):
-    """Analytical target_progress reward for a given y (before clamping is applied)."""
-    raw = (BIN_D / 2 - y) / (BIN_D / 2 - EXIT_Y)
+def _progress_expected(ns):
+    """Analytical target_progress reward for a given NS position (before clamping)."""
+    raw = (BIN_D / 2 - ns) / (BIN_D / 2 - EXIT_Y)
     return float(max(0.0, min(2.0, raw)))
 
 
-# Obstacles parked far north — out of path-blocker zone and clearly inside bin
-_PARKED = [(0.1, 0.85), (0.9, 0.85)]
+# Obstacles parked far north (NS=0.85) — out of path-blocker zone and clearly inside bin
+_PARKED = [(0.85, 0.1), (0.85, 0.9)]
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -96,18 +96,18 @@ class TestTargetProgress:
 
     CFG = make_cfg(tp=True, op=False, pb=False)
 
-    @pytest.mark.parametrize('req_y,expect_clamped', [
+    @pytest.mark.parametrize('req_ns,expect_clamped', [
         (0.85, False),   # north area  → raw < 0, clamped to 0
         (0.50, False),   # centre      → raw = 0
         (0.10, False),   # south area  → raw ~ 0.73
         (-0.07, False),  # past exit   → raw ~ 1.04
         (-0.60, True),   # far past    → clamped to 2.0
     ])
-    def test_values(self, env, req_y, expect_clamped):
+    def test_values(self, env, req_ns, expect_clamped):
         env.reward_cfg = self.CFG
-        state = _place_and_settle(env, (0.5, req_y), _PARKED)
-        actual_y = float(state['target_pos'][1])
-        expected  = _progress_expected(actual_y)
+        state = _place_and_settle(env, (req_ns, 0.5), _PARKED)   # (NS, EW)
+        actual_ns = float(state['target_pos'][0])
+        expected  = _progress_expected(actual_ns)
         reward    = env._compute_reward(state)
         assert reward == pytest.approx(expected, abs=1e-3)
         if expect_clamped:
@@ -115,16 +115,16 @@ class TestTargetProgress:
 
     def test_disabled(self, env):
         env.reward_cfg = make_cfg(tp=False, op=False, pb=False)
-        for req_y in [0.5, 0.1, -0.1]:
-            state = _place_and_settle(env, (0.5, req_y), _PARKED)
+        for req_ns in [0.5, 0.1, -0.1]:
+            state = _place_and_settle(env, (req_ns, 0.5), _PARKED)
             assert env._compute_reward(state) == pytest.approx(0.0, abs=1e-5)
 
     def test_increases_toward_exit(self, env):
         """Reward should be monotonically higher closer to exit (all below BIN_D/2 so none are clamped to 0)."""
         env.reward_cfg = self.CFG
         rewards = []
-        for req_y in [0.45, 0.25, 0.05]:
-            state = _place_and_settle(env, (0.5, req_y), _PARKED)
+        for req_ns in [0.45, 0.25, 0.05]:
+            state = _place_and_settle(env, (req_ns, 0.5), _PARKED)
             rewards.append(env._compute_reward(state))
         assert rewards[0] < rewards[1] < rewards[2]
 
@@ -142,37 +142,37 @@ class TestObstaclePenalty:
 
     def test_none_dropped(self, env):
         env.reward_cfg = self.CFG
-        state = _place_and_settle(env, self.TARGET, [(0.3, 0.8), (0.7, 0.8)])
+        state = _place_and_settle(env, self.TARGET, [(0.8, 0.3), (0.8, 0.7)])  # NS=0.8 far north
         assert env._compute_reward(state) == pytest.approx(0.0, abs=1e-4)
 
     def test_one_dropped(self, env):
         env.reward_cfg = self.CFG
-        # one obstacle clearly past EXIT_Y
-        state = _place_and_settle(env, self.TARGET, [(0.5, -0.20), (0.5, 0.8)])
+        # one obstacle clearly past exit (NS=-0.20)
+        state = _place_and_settle(env, self.TARGET, [(-0.20, 0.5), (0.8, 0.5)])
         reward = env._compute_reward(state)
         assert reward == pytest.approx(-0.5, abs=1e-2)
 
     def test_two_dropped(self, env):
         env.reward_cfg = self.CFG
-        state = _place_and_settle(env, self.TARGET, [(0.3, -0.20), (0.7, -0.20)])
+        state = _place_and_settle(env, self.TARGET, [(-0.20, 0.3), (-0.20, 0.7)])
         reward = env._compute_reward(state)
         assert reward == pytest.approx(-1.0, abs=1e-2)
 
     def test_just_inside_not_counted(self, env):
-        """Obstacle at y = EXIT_Y + 0.05 should NOT be penalised."""
+        """Obstacle at NS = EXIT_Y + 0.05 should NOT be penalised."""
         env.reward_cfg = self.CFG
-        state = _place_and_settle(env, self.TARGET, [(0.5, EXIT_Y + 0.05), (0.5, 0.8)])
+        state = _place_and_settle(env, self.TARGET, [(EXIT_Y + 0.05, 0.5), (0.8, 0.5)])
         reward = env._compute_reward(state)
         assert reward == pytest.approx(0.0, abs=2e-2)
 
     def test_custom_weight(self, env):
         env.reward_cfg = make_cfg(tp=False, op=True, op_w=1.0, pb=False)
-        state = _place_and_settle(env, self.TARGET, [(0.5, -0.20), (0.5, 0.8)])
+        state = _place_and_settle(env, self.TARGET, [(-0.20, 0.5), (0.8, 0.5)])
         assert env._compute_reward(state) == pytest.approx(-1.0, abs=1e-2)
 
     def test_disabled(self, env):
         env.reward_cfg = make_cfg(tp=False, op=False, pb=False)
-        state = _place_and_settle(env, self.TARGET, [(0.3, -0.20), (0.7, -0.20)])
+        state = _place_and_settle(env, self.TARGET, [(-0.20, 0.3), (-0.20, 0.7)])
         assert env._compute_reward(state) == pytest.approx(0.0, abs=1e-5)
 
 
@@ -181,9 +181,9 @@ class TestObstaclePenalty:
 # ---------------------------------------------------------------------------
 
 class TestPathBlocker:
-    """target_progress and obstacle_penalty disabled; target at (0.5, 0.6)."""
+    """target_progress and obstacle_penalty disabled; target at NS=0.60, EW=0.5."""
 
-    TARGET = (0.5, 0.60)
+    TARGET = (0.60, 0.5)   # (NS, EW)
     CFG    = make_cfg(tp=False, op=False, pb=True, pb_w=0.5, pb_s=0.16)
 
     def _reward(self, env, obs_xys, cfg=None):
@@ -192,44 +192,44 @@ class TestPathBlocker:
         return env._compute_reward(state)
 
     def test_perfect_alignment(self, env):
-        """Obstacle directly in front of target → full penalty."""
-        r = self._reward(env, [(0.5, 0.30), (0.9, 0.9)])
+        """Obstacle directly in front of target (same EW) → full penalty."""
+        r = self._reward(env, [(0.30, 0.5), (0.9, 0.9)])
         assert r == pytest.approx(-0.5, abs=2e-2)
 
     def test_at_scale_boundary(self, env):
-        """x_dist == scale → max(0, 1-1) = 0 → no penalty."""
-        r = self._reward(env, [(0.5 + 0.16, 0.30), (0.1, 0.9)])
+        """ew_dist == scale → max(0, 1-1) = 0 → no penalty."""
+        r = self._reward(env, [(0.30, 0.5 + 0.16), (0.9, 0.1)])
         assert r == pytest.approx(0.0, abs=2e-2)
 
     def test_half_scale(self, env):
-        """x_dist == scale/2 → penalty = weight × 0.5."""
-        r = self._reward(env, [(0.5 + 0.08, 0.30), (0.1, 0.9)])
+        """ew_dist == scale/2 → penalty = weight × 0.5."""
+        r = self._reward(env, [(0.30, 0.5 + 0.08), (0.9, 0.1)])
         assert r == pytest.approx(-0.25, abs=2e-2)
 
     def test_obstacle_behind_target(self, env):
-        """Obstacle north of target (y_obs > y_target) → no penalty."""
-        r = self._reward(env, [(0.5, 0.80), (0.1, 0.9)])
+        """Obstacle north of target (NS_obs > NS_target) → no penalty."""
+        r = self._reward(env, [(0.80, 0.5), (0.9, 0.1)])
         assert r == pytest.approx(0.0, abs=1e-4)
 
     def test_obstacle_already_exited(self, env):
-        """Obstacle at y < 0 → not in zone → no penalty."""
-        r = self._reward(env, [(0.5, -0.20), (0.1, 0.9)])
+        """Obstacle at NS < 0 → not in zone → no penalty."""
+        r = self._reward(env, [(-0.20, 0.5), (0.9, 0.1)])
         assert r == pytest.approx(0.0, abs=1e-4)
 
     def test_two_aligned_blockers(self, env):
         """Two perfectly-aligned blockers → penalty = 2 × weight."""
-        r = self._reward(env, [(0.5, 0.30), (0.5, 0.20)])
+        r = self._reward(env, [(0.30, 0.5), (0.20, 0.5)])
         assert r == pytest.approx(-1.0, abs=3e-2)
 
     def test_custom_weight_and_scale(self, env):
-        """pb_w=1.0, pb_s=0.08, x_dist=0.04 → penalty = 1.0 × (1 - 0.04/0.08) = 0.5."""
+        """pb_w=1.0, pb_s=0.08, ew_dist=0.04 → penalty = 1.0 × (1 - 0.04/0.08) = 0.5."""
         cfg = make_cfg(tp=False, op=False, pb=True, pb_w=1.0, pb_s=0.08)
-        r = self._reward(env, [(0.5 + 0.04, 0.30), (0.1, 0.9)], cfg=cfg)
+        r = self._reward(env, [(0.30, 0.5 + 0.04), (0.9, 0.1)], cfg=cfg)
         assert r == pytest.approx(-0.5, abs=2e-2)
 
     def test_disabled(self, env):
         env.reward_cfg = make_cfg(tp=False, op=False, pb=False)
-        state = _place_and_settle(env, self.TARGET, [(0.5, 0.30), (0.9, 0.9)])
+        state = _place_and_settle(env, self.TARGET, [(0.30, 0.5), (0.9, 0.9)])
         assert env._compute_reward(state) == pytest.approx(0.0, abs=1e-5)
 
 
@@ -241,8 +241,8 @@ class TestCombined:
 
     def test_all_terms_sum(self, env):
         """Total reward == sum of individually-isolated rewards."""
-        target  = (0.5, 0.30)   # south area — non-trivial progress
-        obs     = [(0.5, 0.15), (0.4, -0.20)]  # one blocker, one dropped
+        target  = (0.30, 0.5)   # south area — non-trivial progress (NS=0.30)
+        obs     = [(0.15, 0.5), (-0.20, 0.4)]  # one blocker (NS<target), one dropped
 
         def iso_reward(cfg):
             env.reward_cfg = cfg
@@ -259,13 +259,13 @@ class TestCombined:
     def test_cfg_none_no_crash(self, env):
         """reward_cfg=None uses hardcoded defaults — should not raise."""
         env.reward_cfg = None
-        state = _place_and_settle(env, (0.5, 0.3), _PARKED)
+        state = _place_and_settle(env, (0.3, 0.5), _PARKED)
         reward = env._compute_reward(state)
         assert math.isfinite(reward)
 
     def test_cfg_none_matches_defaults(self, env):
         """reward_cfg=None should give the same result as the default config."""
-        target, obs = (0.5, 0.3), _PARKED
+        target, obs = (0.3, 0.5), _PARKED
 
         env.reward_cfg = None
         state = _place_and_settle(env, target, obs)

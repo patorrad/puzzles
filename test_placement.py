@@ -123,24 +123,24 @@ class TestTargetZLevelNone:
 class TestPlacementInvariants:
 
     def test_target_within_bin_bounds(self):
-        """Target x,y always within [margin, bin_w/d - margin]."""
+        """Target x (NS), y (EW) always within valid ranges."""
         for seed in range(50):
             state = random_initial_state(n_obstacles=3, obj_size=OBJ_SIZE, n_z_levels=2,
                                          target_z_level=None, seed=seed)
             tx, ty = state['target_pos'][0].item(), state['target_pos'][1].item()
-            assert MARGIN <= tx <= BIN_W - MARGIN, f"seed={seed}: tx={tx:.4f} out of bounds"
-            assert MARGIN <= ty <= BIN_D - MARGIN, f"seed={seed}: ty={ty:.4f} out of bounds"
+            assert MARGIN <= tx <= BIN_D - MARGIN, f"seed={seed}: tx(NS)={tx:.4f} out of bounds"
+            assert MARGIN <= ty <= BIN_W - MARGIN, f"seed={seed}: ty(EW)={ty:.4f} out of bounds"
 
     def test_obstacles_within_bin_bounds(self):
-        """All obstacle x,y within [margin, bin_w/d - margin]."""
+        """All obstacle x (NS), y (EW) within valid ranges."""
         for seed in range(50):
             state = random_initial_state(n_obstacles=3, obj_size=OBJ_SIZE, n_z_levels=2,
                                          target_z_level=None, seed=seed)
             for i in range(3):
                 ox = state['obstacle_pos'][i][0].item()
                 oy = state['obstacle_pos'][i][1].item()
-                assert MARGIN <= ox <= BIN_W - MARGIN, f"seed={seed} obs={i}: ox={ox:.4f} out of bounds"
-                assert MARGIN <= oy <= BIN_D - MARGIN, f"seed={seed} obs={i}: oy={oy:.4f} out of bounds"
+                assert MARGIN <= ox <= BIN_D - MARGIN, f"seed={seed} obs={i}: ox(NS)={ox:.4f} out of bounds"
+                assert MARGIN <= oy <= BIN_W - MARGIN, f"seed={seed} obs={i}: oy(EW)={oy:.4f} out of bounds"
 
     def test_no_same_column_same_z_overlaps(self):
         """No two objects share the same (x,y) column at the same z-height."""

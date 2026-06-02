@@ -5,10 +5,10 @@ bin_size: 0.6
 friction: 1.2
 
 # 3×3×3 cube of objects centered in the bin.
-# 9 columns at (x, y) ∈ {0.15, 0.25, 0.35}², each stacked 3 high.
+# 9 columns at (NS, EW) ∈ {0.15, 0.25, 0.35}², each stacked 3 high.
 # Column spacing = 2×obj_size = 0.10 m (well above the 1.05×obj_size min separation).
 # z-levels: floor=0.025, middle=0.075, top=0.125  (obj_h + i × obj_size)
-# Target occupies the exact center: (0.25, 0.25, 0.075).
+# Target occupies the exact center: (0.25, 0.25, 0.075). Symmetric grid — positions unchanged.
 # Obstacles sorted by ascending z so lower objects are spawned before upper ones.
 initial_state:
   target_pos: [0.25, 0.25, 0.075]
