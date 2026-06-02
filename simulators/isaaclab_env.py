@@ -309,23 +309,23 @@ class BinEnvIsaacLab(SimulatorEnv):
             (bw + 2*wt, bd + 2*wt, wt),
             mass=1.0, kinematic=True, friction=fr, color=(0.7, 0.6, 0.5))
         north_cfg  = self._make_box_cfg(
-            (bw + 2*wt, wt, BIN_H),
+            (wt, bw + 2*wt, BIN_H),   # thin in x (NS), spans y (EW)
             mass=1.0, kinematic=True, friction=fr, color=(0.5, 0.5, 0.8),
             contact_offset=0.02)
         west_cfg   = self._make_box_cfg(
-            (wt, bd, BIN_H),
+            (bd, wt, BIN_H),          # spans x (NS), thin in y (EW)
             mass=1.0, kinematic=True, friction=fr, color=(0.5, 0.5, 0.8),
             contact_offset=0.02)
         east_cfg   = self._make_box_cfg(
-            (wt, bd, BIN_H),
+            (bd, wt, BIN_H),
             mass=1.0, kinematic=True, friction=fr, color=(0.5, 0.5, 0.8),
             contact_offset=0.02)
         pns_cfg    = self._make_box_cfg(
-            (self._pusher_w, PUSHER_T, self._pusher_w),
+            (PUSHER_T, self._pusher_w, self._pusher_w),   # thin in x (NS sweep direction)
             mass=10.0, kinematic=True, friction=fr, color=(0.2, 0.9, 0.2),
             activate_contact_sensors=True)
         pew_cfg    = self._make_box_cfg(
-            (PUSHER_T, self._pusher_w, self._pusher_w),
+            (self._pusher_w, PUSHER_T, self._pusher_w),   # thin in y (EW sweep direction)
             mass=10.0, kinematic=True, friction=fr, color=(0.9, 0.6, 0.1),
             activate_contact_sensors=True)
         target_cfg = self._make_box_cfg(
@@ -344,7 +344,7 @@ class BinEnvIsaacLab(SimulatorEnv):
         # Visual-only plane marking EXIT_Y — kinematic, collision disabled so
         # the target can pass through it freely.
         exit_marker_cfg = sim_utils.CuboidCfg(
-            size=(bw, 0.004, .02),
+            size=(0.004, bw, .02),    # thin in x (NS), spans y (EW)
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 kinematic_enabled=True,
                 disable_gravity=True,
@@ -370,18 +370,19 @@ class BinEnvIsaacLab(SimulatorEnv):
             ep = f"/World/envs/env_{ei}"
 
             # Static geometry
+            # Bin: NS along world x (exit at low x), EW along world y.
             self._spawn_prim(f"{ep}/Floor", floor_cfg,
-                             (ox + bw/2, oy + bd/2, -wt/2))
+                             (ox + bd/2, oy + bw/2, -wt/2))
             self._spawn_prim(f"{ep}/WallNorth", north_cfg,
-                             (ox + bw/2, oy + bd + wt/2, BIN_H/2))
+                             (ox + bd + wt/2, oy + bw/2, BIN_H/2))
             self._spawn_prim(f"{ep}/WallWest",  west_cfg,
-                             (ox - wt/2, oy + bd/2, BIN_H/2))
+                             (ox + bd/2, oy - wt/2, BIN_H/2))
             self._spawn_prim(f"{ep}/WallEast",  east_cfg,
-                             (ox + bw + wt/2, oy + bd/2, BIN_H/2))
+                             (ox + bd/2, oy + bw + wt/2, BIN_H/2))
 
-            # Exit boundary marker at EXIT_Y (south of the bin opening)
+            # Exit boundary marker at EXIT_Y (west of the bin opening)
             self._spawn_prim(f"{ep}/ExitMarker", exit_marker_cfg,
-                             (ox + bw/2, oy + EXIT_Y, self._OBJ_H))
+                             (ox + EXIT_Y, oy + bw/2, self._OBJ_H))
 
             # Kinematic pushers (parked outside bin)
             park_w = self._local_to_world(self._park, ei)
@@ -480,27 +481,28 @@ class BinEnvIsaacLab(SimulatorEnv):
         """Return (eye, target) world positions scaled to the current bin size."""
         bw, bd = self.bin_w, self.bin_d
         view_dist = max(bw, bd) * 1.5
-        target = (ox + bw / 2, oy + bd * 0.1, self._OBJ_H)
-        # Camera direction: slightly right, mostly south, elevated (unit vector)
-        eye = (target[0] + 0.183 * view_dist,
-               target[1] - 0.948 * view_dist,
+        # Look slightly inside the bin from the exit (west/low-x) side
+        target = (ox + bd * 0.1, oy + bw / 2, self._OBJ_H)
+        # Camera direction: mostly west (negative x = exit side), slightly north, elevated
+        eye = (target[0] - 0.948 * view_dist,
+               target[1] + 0.183 * view_dist,
                target[2] + 0.320 * view_dist)
         return eye, target
 
     def _local_to_world(self, pos_local: list, env_idx: int) -> tuple:
         """Convert a bin-local 3-D position to world coordinates.
 
-        Bin-local: x=NS/forward, y=EW/lateral.
-        World (Isaac Lab): x=EW, y=NS.
+        Bin-local: x=NS/forward (exit at x→0), y=EW/lateral.
+        Bin placed with NS along world x, EW along world y.
+        Exit is at negative world x (west face open).
         """
         ox, oy = self._env_origins_xy[env_idx]
-        return (pos_local[1] + ox, pos_local[0] + oy, pos_local[2])
+        return (pos_local[0] + ox, pos_local[1] + oy, pos_local[2])
 
     def _world_to_local(self, pos_world: torch.Tensor, env_idx: int) -> torch.Tensor:
-        """Subtract env origin and swap x/y to return bin-local frame (x=NS, y=EW)."""
+        """Subtract env origin; returns bin-local frame (x=NS, y=EW). No axis swap."""
         origin = self.env_origins[env_idx].to(pos_world.device)
-        rel = pos_world - origin   # [EW, NS, z] in world order
-        return torch.stack([rel[1], rel[0], rel[2]])  # → [NS, EW, z]
+        return pos_world - origin
 
     # ------------------------------------------------------------------
     # Physics step helpers
@@ -560,8 +562,8 @@ class BinEnvIsaacLab(SimulatorEnv):
             # Quat is pre-filled with _IDENTITY_QUAT at build time — no write needed.
             ei = env_idx if env_idx is not None else int(env_ids[0].item())
             ox, oy = self._env_origins_xy[ei]
-            pose_buf[0, 0] = pos_local[1] + ox  # world x = EW = bin-local y
-            pose_buf[0, 1] = pos_local[0] + oy  # world y = NS = bin-local x
+            pose_buf[0, 0] = pos_local[0] + ox  # world x = NS = bin-local x
+            pose_buf[0, 1] = pos_local[1] + oy  # world y = EW = bin-local y
             pose_buf[0, 2] = pos_local[2]
             obj.write_root_pose_to_sim(pose_buf, env_ids=env_ids)
             obj.write_root_velocity_to_sim(self._vel_buf[obj], env_ids=env_ids)
@@ -680,14 +682,12 @@ class BinEnvIsaacLab(SimulatorEnv):
             # root_quat_w shape: (n_envs, 4), convention (w,x,y,z)
             return obj.data.root_quat_w[env_idx].clone()
 
-        # Obstacles bypass _world_to_local so we apply the swap here:
-        # object_link_pose_w is (n_obs, 7) in world order [EW, NS, z, quat...]
         raw_obs_world = self.obstacle_collection.data.object_link_pose_w[env_idx, :, :3].clone()
-        raw_obs_rel   = raw_obs_world - self.env_origins[env_idx].to(self.device)  # [EW, NS, z]
+        raw_obs_rel   = raw_obs_world - self.env_origins[env_idx].to(self.device)  # [NS, EW, z]
         return {
             'target_pos':    _pos(self.target_obj),
             'target_quat':   _quat(self.target_obj),
-            'obstacle_pos':  raw_obs_rel[:, [1, 0, 2]],   # → [NS, EW, z]
+            'obstacle_pos':  raw_obs_rel,   # world == local (no swap)
             'obstacle_quat': self.obstacle_collection.data.object_link_pose_w[env_idx, :, 3:].clone(),
         }
 
@@ -706,20 +706,20 @@ class BinEnvIsaacLab(SimulatorEnv):
         k = len(states)
         origins = self._origins_xyz[env_ids]           # (k, 3), pure GPU index
 
-        # Target — bin-local [NS, EW, z] → world [EW, NS, z] via column swap
+        # Target — bin-local [NS, EW, z] == world order (no swap)
         tgt_pos  = torch.stack([s['target_pos'].to(self.device)  for s in states])  # (k, 3)
         tgt_quat = torch.stack([s['target_quat'].to(self.device) for s in states])  # (k, 4)
         buf = self._batch_tgt_pose_buf[:k]
-        buf[:, :3] = tgt_pos[:, [1, 0, 2]] + origins
+        buf[:, :3] = tgt_pos + origins
         buf[:, 3:]  = tgt_quat
         self.target_obj.write_root_pose_to_sim(buf, env_ids=env_ids)
         self.target_obj.write_root_velocity_to_sim(self._batch_vel_zero[:k], env_ids=env_ids)
 
-        # Obstacles — same [NS, EW, z] → [EW, NS, z] swap
+        # Obstacles — same no-swap
         obs_pos  = torch.stack([s['obstacle_pos'].to(self.device)  for s in states])  # (k, n_obs, 3)
         obs_quat = torch.stack([s['obstacle_quat'].to(self.device) for s in states])  # (k, n_obs, 4)
         obs_buf  = self._batch_obs_state_buf[:k]
-        obs_buf[:, :, :3]  = obs_pos[:, :, [1, 0, 2]] + origins.unsqueeze(1)
+        obs_buf[:, :, :3]  = obs_pos + origins.unsqueeze(1)
         obs_buf[:, :, 3:7] = obs_quat
         # obs_buf[:, :, 7:] stays zero (pre-zeroed at alloc time)
         self.obstacle_collection.write_object_state_to_sim(obs_buf, env_ids=env_ids)
@@ -906,9 +906,9 @@ class BinEnvIsaacLab(SimulatorEnv):
             ends   = torch.tensor([strokes[i][2] for i in idxs], dtype=torch.float32)
             ox     = torch.tensor([self._env_origins_xy[i][0] for i in idxs], dtype=torch.float32)
             oy     = torch.tensor([self._env_origins_xy[i][1] for i in idxs], dtype=torch.float32)
-            # bin-local [NS, EW, z] → world [EW, NS, z]: swap columns, then add origin
-            pos0   = starts[:, [1, 0, 2]].clone(); pos0[:, 0] += ox; pos0[:, 1] += oy
-            delta  = (ends - starts)[:, [1, 0, 2]]   # swap delta to world frame too
+            # bin-local [NS, EW, z] == world order (no swap): just add origin
+            pos0   = starts.clone(); pos0[:, 0] += ox; pos0[:, 1] += oy
+            delta  = ends - starts
             ids    = torch.tensor(idxs, dtype=torch.long)
             return pos0.to(self.device), delta.to(self.device), ids.to(self.device)
 
@@ -1083,8 +1083,8 @@ class BinEnvIsaacLab(SimulatorEnv):
         ox = self.env_origins[0, 0].item()
         oy = self.env_origins[0, 1].item()
         bw, bd = self.bin_w, self.bin_d
-        rec_target = (ox + bw / 2, oy + bd / 2, self._OBJ_H)
-        rec_eye    = (ox + bw / 2, oy - 1.0,    1.2)
+        rec_target = (ox + bd / 2, oy + bw / 2, self._OBJ_H)
+        rec_eye    = (ox - 1.0,    oy + bw / 2, 1.2)   # west side (exit side)
         camera = rep.create.camera(position=rec_eye, look_at=rec_target)
         render_product = rep.create.render_product(camera, resolution=resolution)
         rgb_ann = rep.AnnotatorRegistry.get_annotator("rgb")
