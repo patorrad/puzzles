@@ -89,7 +89,7 @@ def _puzzle_worker(cfg: DictConfig, scenarios: list, out_dir: Path, q) -> None:
     """
     import os
     record_video = cfg.get('record_video', False) and cfg.simulator.name == 'isaaclab'
-    planner_viewer_mode = 'always' if cfg.get('show_mpc_planner_viewer', False) else 'headless'
+    planner_viewer_mode = cfg.get("viewer", "headless")
     if cfg.simulator.name == 'isaaclab':
         if planner_viewer_mode == 'headless':
             os.environ['ISAACLAB_HEADLESS'] = '1'
@@ -528,81 +528,76 @@ def _run_isaaclabmpc(scenario_name: str, scenario_yaml: Path, solution_json: Pat
     return mpc_result
 
 
-def _run_isaaclabmpc_pull_scenario(scenario_name: str, out_dir: Path,
-                                    cfg: DictConfig) -> tuple['MpcResult', dict | None]:
-    """Server mode: start mpc_server.py (--defer_solution), read block poses from the live
-    simulation via MPPIIsaacLabPlanner(read_only=True), run puzzle planning, inject solution
-    via reset_episode(), then run world.py."""
+def _run_real_robot_scenario(scenario_name: str, out_dir: Path,
+                              cfg: DictConfig) -> tuple['MpcResult', dict | None]:
+    """Real-robot mode: launch bridge_server.py as a subprocess so the bridge
+    node can connect, read object state via zerorpc client, run puzzle planning,
+    inject solution, then leave the server running."""
+    import io
     import torch
 
-    ilab_dir       = Path(cfg.isaaclabmpc_dir)
-    result_json    = (out_dir / 'isaaclabmpc_results' / f'{scenario_name}.json').resolve()
-    telemetry_json = (out_dir / 'telemetry' / f'{scenario_name}_planner.json').resolve()
-    planner_log    = out_dir / 'logs' / f'{scenario_name}_planner.txt'
-    world_log      = out_dir / 'logs' / f'{scenario_name}_world.txt'
+    def _b2t(b: bytes) -> torch.Tensor:
+        return torch.load(io.BytesIO(b))
 
-    python              = sys.executable
-    show_planner_viewer = cfg.get('show_mpc_planner_viewer', False)
-    show_world_viewer   = cfg.get('show_mpc_world_viewer', False)
+    addr     = cfg.get('bridge_server_address', 'tcp://localhost:4242')
+    bind_addr = addr.replace('localhost', '0.0.0.0').replace('127.0.0.1', '0.0.0.0')
+    server_log = out_dir / 'logs' / f'{scenario_name}_bridge_server.txt'
 
-    # ── 1. Launch mpc_server.py with --defer_solution ────────────────────────
-    server_script = Path(__file__).parent / "mpc_server.py"
-    planner_cmd = [
-        python, str(server_script),
-        '--isaaclabmpc_dir', str(ilab_dir),
-        '--defer_solution',
-        '--telemetry_path', str(telemetry_json),
-    ]
-    if not show_planner_viewer:
-        planner_cmd.append('--headless')
+    bridge_server_script = Path(__file__).parent / 'bridge_server.py'
+    server_cmd = [sys.executable, str(bridge_server_script), '--address', bind_addr]
 
     _check_port_free(4242)
-    print(f'\n[MPC-server] {scenario_name}: launching mpc_server.py (defer_solution) …')
-    print(f'[MPC-server] {scenario_name}: cmd: {" ".join(planner_cmd)}')
-    planner_proc = subprocess.Popen(
-        planner_cmd,
+    print(f'\n[real-robot] {scenario_name}: launching bridge_server.py on {bind_addr} …')
+    server_proc = subprocess.Popen(
+        server_cmd,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, bufsize=1,
     )
-    _stream_output(planner_proc.stdout, planner_log, f'[{scenario_name}/planner] ')
+    _stream_output(server_proc.stdout, server_log, f'[{scenario_name}/bridge_server] ')
 
-    # ── 2. Wait for server to be ready ───────────────────────────────────────
+    # Wait for the server to be reachable
     try:
-        _wait_for_planner_server("tcp://localhost:4242", max_wait_s=120)
+        _wait_for_planner_server(addr, max_wait_s=30)
     except TimeoutError as e:
-        print(f'[MPC-server] {scenario_name}: ERROR — {e}')
-        planner_proc.kill()
+        print(f'[real-robot] ERROR: {e}')
+        server_proc.kill()
         return MpcResult(scenario_name=scenario_name, success=False,
                          steps_completed=0, total_steps=0, elapsed_time_s=0.0), None
 
-    # ── 3. Read block poses from live simulation via read-only proxy ──────────
-    import sys as _sys
-    _isaaclabmpc_root = str(Path(cfg.isaaclabmpc_dir).parent.parent)
-    if _isaaclabmpc_root not in _sys.path:
-        _sys.path.insert(0, _isaaclabmpc_root)
-    from isaaclab_mpc.planner.mppi_isaaclab import MPPIIsaacLabPlanner as _PlannerProxy
-    from isaaclab_mpc.utils.transport import bytes_to_torch as _b2t
+    import zerorpc as _zerorpc
+    client = _zerorpc.Client(timeout=10, heartbeat=None)
+    client.connect(addr)
 
-    proxy = _PlannerProxy(read_only=True, server_addr="tcp://localhost:4242")
-    try:
-        raw_poses = _b2t(proxy.get_sim_object_poses())
-    except Exception as e:
-        print(f'[MPC-server] {scenario_name}: get_sim_object_poses failed: {e}')
-        planner_proc.kill()
+    # Wait until the bridge node has pushed at least one set of object poses
+    wait_timeout = cfg.get('bridge_state_timeout_s', 30)
+    deadline = time.time() + wait_timeout
+    raw_poses = None
+    while time.time() < deadline:
+        try:
+            poses_bytes = client.get_sim_object_poses()
+            t = _b2t(poses_bytes)
+            if t.numel() > 0:
+                raw_poses = t
+                break
+        except Exception:
+            pass
+        time.sleep(0.5)
+
+    if raw_poses is None:
+        print('[real-robot] ERROR: no object poses received from bridge node within timeout')
+        server_proc.kill()
         return MpcResult(scenario_name=scenario_name, success=False,
                          steps_completed=0, total_steps=0, elapsed_time_s=0.0), None
 
     n_objects = raw_poses.numel() // 7
 
     def _world_to_bin(wp):
-        """Inverse of scene.py _bin_to_mppi_local: world frame → bin frame."""
-        return [wp[1] - 0.075, wp[0] - 0.35, wp[2] - 1.225]
+        return [wp[1] - 0.075, wp[0] - 0.35, wp[2] - 1.025]
 
-    positions_bin = [_world_to_bin(raw_poses[i * 7:i * 7 + 3].tolist()) for i in range(n_objects)]
-    quats         = [raw_poses[i * 7 + 3:i * 7 + 7].tolist()            for i in range(n_objects)]
-
+    positions_bin = [_world_to_bin(raw_poses[i * 7: i * 7 + 3].tolist()) for i in range(n_objects)]
+    quats         = [raw_poses[i * 7 + 3: i * 7 + 7].tolist()            for i in range(n_objects)]
     n_obs = n_objects - 1
-    print(f'[MPC-server] {scenario_name}: sim poses received ({n_obs} obstacles)')
+    print(f'[real-robot] {n_objects} objects received ({n_obs} obstacles)')
 
     initial_state = {
         'target_pos':    torch.tensor(positions_bin[0]),
@@ -611,13 +606,15 @@ def _run_isaaclabmpc_pull_scenario(scenario_name: str, out_dir: Path,
         'obstacle_quat': torch.tensor(quats[1:]),
     }
 
-    # ── 4. Patch cfg and run puzzle planning ─────────────────────────────────
+    print(f'[real-robot] object states (bin frame) being passed to MCTS:')
+    print(f'  target   pos={[f"{v:.4f}" for v in positions_bin[0]]}  quat={[f"{v:.4f}" for v in quats[0]]}')
+    for i, (pos, quat) in enumerate(zip(positions_bin[1:], quats[1:])):
+        print(f'  obstacle {i} pos={[f"{v:.4f}" for v in pos]}  quat={[f"{v:.4f}" for v in quat]}')
+
     with open_dict(cfg):
         cfg.n_obstacles = n_obs
-        # bin_size, wall_thickness, friction stay from pipeline.yaml config
 
-    print(f'[MPC-server] {scenario_name}: running puzzle planning '
-          f'(n_obstacles={cfg.n_obstacles}, bin_size={cfg.bin_size}) …')
+    print(f'[real-robot] running puzzle planning (n_obstacles={n_obs}) …')
     ctx  = multiprocessing.get_context('spawn')
     pq   = ctx.Queue()
     proc = ctx.Process(
@@ -625,13 +622,12 @@ def _run_isaaclabmpc_pull_scenario(scenario_name: str, out_dir: Path,
         args=(cfg, [(scenario_name, initial_state)], out_dir, pq),
     )
     proc.start()
-
     puzzle_timeout = cfg.get('puzzle_timeout_s', None)
-    worker_result  = None
+    worker_result = None
     try:
         worker_result = pq.get(timeout=puzzle_timeout)
     except queue.Empty:
-        print(f'[MPC-server] {scenario_name}: puzzle planning timed out')
+        print('[real-robot] puzzle planning timed out')
     try:
         proc.kill()
     except OSError:
@@ -640,81 +636,34 @@ def _run_isaaclabmpc_pull_scenario(scenario_name: str, out_dir: Path,
 
     solution_path = out_dir / 'solutions' / f'{scenario_name}.json'
     if worker_result is None or not solution_path.exists():
-        print(f'[MPC-server] {scenario_name}: puzzle planning failed — aborting MPC')
-        planner_proc.kill()
+        print('[real-robot] puzzle planning failed — no solution injected')
+        server_proc.kill()
         return MpcResult(scenario_name=scenario_name, success=False,
                          steps_completed=0, total_steps=0, elapsed_time_s=0.0), initial_state
 
     for pr in worker_result.get('puzzle_results', []):
-        print(f'[MPC-server] puzzle result: success={pr.success} plan_len={pr.plan_length}')
+        print(f'[real-robot] puzzle result: success={pr.success} plan_len={pr.plan_length}')
 
-    # ── 5. Inject solution into planner ──────────────────────────────────────
     with open(solution_path) as f:
         solution_data = json.load(f)
     steps_json = json.dumps(solution_data['steps'])
-    print(f'[MPC-server] {scenario_name}: injecting {len(solution_data["steps"])} '
-          f'steps via reset_episode …')
+    print(f'[real-robot] injecting {len(solution_data["steps"])} steps via reset_episode …')
+    client.reset_episode(steps_json)
+
+    server_proc.send_signal(signal.SIGTERM)
     try:
-        proxy.reset_episode(steps_json)
-    except Exception as e:
-        print(f'[MPC-server] {scenario_name}: reset_episode failed: {e}')
-
-    # ── 6. Launch world.py ───────────────────────────────────────────────────
-    world_cmd = [
-        python, str(ilab_dir / 'world.py'),
-        '--n_steps', str(cfg.isaaclabmpc_n_steps),
-    ]
-    if not show_world_viewer:
-        world_cmd.append('--headless')
-
-    print(f'[MPC-server] {scenario_name}: launching world …')
-    world_proc = subprocess.Popen(
-        world_cmd,
-        cwd=str(ilab_dir.parent.parent),
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, bufsize=1,
-    )
-    _stream_output(world_proc.stdout, world_log, f'[{scenario_name}/world] ')
-
-    # ── 7. Wait for completion ───────────────────────────────────────────────
-    timed_out = False
-    try:
-        world_proc.wait(timeout=cfg.isaaclabmpc_timeout_s)
+        server_proc.wait(timeout=5)
     except subprocess.TimeoutExpired:
-        print(f'[MPC-server] {scenario_name}: TIMEOUT after {cfg.isaaclabmpc_timeout_s}s')
-        world_proc.kill()
-        timed_out = True
-    finally:
-        planner_proc.send_signal(signal.SIGTERM)
-        try:
-            planner_proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            planner_proc.kill()
+        server_proc.kill()
+    print(f'[real-robot] bridge_server stopped')
 
-    result_data = {}
-    if result_json.exists():
-        with open(result_json) as f:
-            result_data = json.load(f)
-
-    telemetry_data = {}
-    if telemetry_json.exists():
-        with open(telemetry_json) as f:
-            telemetry_data = json.load(f)
-
-    mpc_result = MpcResult(
+    return MpcResult(
         scenario_name=scenario_name,
-        success=result_data.get('success', False) and not timed_out,
-        steps_completed=result_data.get('steps_completed', 0),
-        total_steps=result_data.get('total_steps', 0),
-        elapsed_time_s=result_data.get('elapsed_time_s', 0.0),
-        ee_trajectory=result_data.get('ee_trajectory'),
-        block_positions_final=result_data.get('block_positions_final'),
-        step_completion_events=result_data.get('step_completion_events'),
-        mppi_cost_history=telemetry_data.get('mppi_cost_history'),
-    )
-    status = 'SUCCESS' if mpc_result.success else ('TIMEOUT' if timed_out else 'RUNNING/UNKNOWN')
-    print(f'[MPC-server] {scenario_name}: {status}')
-    return mpc_result, initial_state
+        success=True,
+        steps_completed=0,
+        total_steps=len(solution_data['steps']),
+        elapsed_time_s=0.0,
+    ), initial_state
 
 
 def _log_mpc_wandb(result: MpcResult, step: int, initial_state=None,
@@ -1031,7 +980,7 @@ def main(cfg: DictConfig) -> None:
         print('Server mode: query scenario from planner, plan, inject, MPC')
         print('=' * 60)
 
-        mpc_result, initial_state = _run_isaaclabmpc_pull_scenario(
+        mpc_result, initial_state = _run_real_robot_scenario(
             scenario_name, out_dir, cfg
         )
 

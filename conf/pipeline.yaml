@@ -18,7 +18,7 @@ difficult_spawn: false
 wall_thickness: 0.02
 friction: 1.2
 parallel_envs: 8
-viewer: always
+viewer: headless
 
 # Puzzle solver child process (null = wait indefinitely)
 puzzle_timeout_s: null
@@ -29,7 +29,7 @@ scenario_file: null
 
 # Server mode: pull env setup from the running planner instead of a YAML.
 # Usage: python pipeline.py --config-name=pipeline scenario_source=server
-scenario_source: null
+scenario_source: server
 server_scenario_name: server_scenario
 
 # Resume mode: skip scenario generation + puzzle planning, run MPC only
