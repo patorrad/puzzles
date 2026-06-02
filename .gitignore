@@ -6,6 +6,7 @@ __pycache__/
 .eggs/
 dist/
 build/
+outputs/
 
 # Generated data and model artefacts
 dataset.npz

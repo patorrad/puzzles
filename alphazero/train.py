@@ -189,7 +189,9 @@ def train(env, cfg):
         try:
             import wandb as _wb
             wandb = _wb
-            wandb.init(project='puzzle-alphazero',
+            wandb.init(project=cfg.get('wandb_project', 'puzzle-alphazero'),
+                       entity=cfg.get('wandb_entity') or None,
+                       name=cfg.get('wandb_run_name') or None,
                        config={'cfg': dict(cfg),
                                'spec': asdict(spec),
                                'solver_in_dim': solver_net.in_dim,

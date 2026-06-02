@@ -35,9 +35,12 @@ output_dir: outputs/alphazero
 device: cpu
 use_wandb: true
 log_video: true   # capture a self-play replay video at every checkpoint and upload to wandb (isaaclab only)
+wandb_project: puzzle-alphazero
+wandb_entity: null
+wandb_run_name: null
 
 selfplay:
-  n_simulations_solver: 100
+  n_simulations_solver: 200
   n_simulations_stacker: 100
   max_depth: 10
   temperature_init: 1.0
