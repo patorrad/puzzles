@@ -530,9 +530,9 @@ def _run_isaaclabmpc(scenario_name: str, scenario_yaml: Path, solution_json: Pat
 
 def _run_isaaclabmpc_pull_scenario(scenario_name: str, out_dir: Path,
                                     cfg: DictConfig) -> tuple['MpcResult', dict | None]:
-    """Server mode: start planner (--defer_solution), query scenario info, run puzzle
-    planning, inject solution via reset_episode(), then run world.py."""
-    import zerorpc as _zerorpc
+    """Server mode: start mpc_server.py (--defer_solution), read block poses from the live
+    simulation via MPPIIsaacLabPlanner(read_only=True), run puzzle planning, inject solution
+    via reset_episode(), then run world.py."""
     import torch
 
     ilab_dir       = Path(cfg.isaaclabmpc_dir)
@@ -545,9 +545,11 @@ def _run_isaaclabmpc_pull_scenario(scenario_name: str, out_dir: Path,
     show_planner_viewer = cfg.get('show_mpc_planner_viewer', False)
     show_world_viewer   = cfg.get('show_mpc_world_viewer', False)
 
-    # ── 1. Launch planner with --defer_solution ──────────────────────────────
+    # ── 1. Launch mpc_server.py with --defer_solution ────────────────────────
+    server_script = Path(__file__).parent / "mpc_server.py"
     planner_cmd = [
-        python, str(ilab_dir / 'planner.py'),
+        python, str(server_script),
+        '--isaaclabmpc_dir', str(ilab_dir),
         '--defer_solution',
         '--telemetry_path', str(telemetry_json),
     ]
@@ -555,11 +557,10 @@ def _run_isaaclabmpc_pull_scenario(scenario_name: str, out_dir: Path,
         planner_cmd.append('--headless')
 
     _check_port_free(4242)
-    print(f'\n[MPC-server] {scenario_name}: launching planner (defer_solution) …')
+    print(f'\n[MPC-server] {scenario_name}: launching mpc_server.py (defer_solution) …')
     print(f'[MPC-server] {scenario_name}: cmd: {" ".join(planner_cmd)}')
     planner_proc = subprocess.Popen(
         planner_cmd,
-        cwd=str(ilab_dir.parent.parent),
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
         text=True, bufsize=1,
     )
@@ -574,35 +575,46 @@ def _run_isaaclabmpc_pull_scenario(scenario_name: str, out_dir: Path,
         return MpcResult(scenario_name=scenario_name, success=False,
                          steps_completed=0, total_steps=0, elapsed_time_s=0.0), None
 
-    # ── 3. Query scenario info ────────────────────────────────────────────────
-    client = _zerorpc.Client(timeout=30, heartbeat=None)
-    client.connect("tcp://localhost:4242")
+    # ── 3. Read block poses from live simulation via read-only proxy ──────────
+    import sys as _sys
+    _isaaclabmpc_root = str(Path(cfg.isaaclabmpc_dir).parent.parent)
+    if _isaaclabmpc_root not in _sys.path:
+        _sys.path.insert(0, _isaaclabmpc_root)
+    from isaaclab_mpc.planner.mppi_isaaclab import MPPIIsaacLabPlanner as _PlannerProxy
+    from isaaclab_mpc.utils.transport import bytes_to_torch as _b2t
+
+    proxy = _PlannerProxy(read_only=True, server_addr="tcp://localhost:4242")
     try:
-        scenario_info = json.loads(client.get_scenario_info())
+        raw_poses = _b2t(proxy.get_sim_object_poses())
     except Exception as e:
-        print(f'[MPC-server] {scenario_name}: get_scenario_info failed: {e}')
-        client.close()
+        print(f'[MPC-server] {scenario_name}: get_sim_object_poses failed: {e}')
         planner_proc.kill()
         return MpcResult(scenario_name=scenario_name, success=False,
                          steps_completed=0, total_steps=0, elapsed_time_s=0.0), None
 
-    n_obs = len(scenario_info['initial_state']['obstacles'])
-    print(f'[MPC-server] {scenario_name}: scenario received ({n_obs} obstacles)')
+    n_objects = raw_poses.numel() // 7
+
+    def _world_to_bin(wp):
+        """Inverse of scene.py _bin_to_mppi_local: world frame → bin frame."""
+        return [wp[1] - 0.075, wp[0] - 0.35, wp[2] - 1.225]
+
+    positions_bin = [_world_to_bin(raw_poses[i * 7:i * 7 + 3].tolist()) for i in range(n_objects)]
+    quats         = [raw_poses[i * 7 + 3:i * 7 + 7].tolist()            for i in range(n_objects)]
+
+    n_obs = n_objects - 1
+    print(f'[MPC-server] {scenario_name}: sim poses received ({n_obs} obstacles)')
 
     initial_state = {
-        'target_pos':    torch.tensor(scenario_info['initial_state']['target_pos']),
-        'target_quat':   torch.tensor(scenario_info['initial_state']['target_quat']),
-        'obstacle_pos':  torch.tensor([o['pos']  for o in scenario_info['initial_state']['obstacles']]),
-        'obstacle_quat': torch.tensor([o['quat'] for o in scenario_info['initial_state']['obstacles']]),
+        'target_pos':    torch.tensor(positions_bin[0]),
+        'target_quat':   torch.tensor(quats[0]),
+        'obstacle_pos':  torch.tensor(positions_bin[1:]),
+        'obstacle_quat': torch.tensor(quats[1:]),
     }
 
     # ── 4. Patch cfg and run puzzle planning ─────────────────────────────────
-    env_cfg = scenario_info['env_config']
     with open_dict(cfg):
-        cfg.n_obstacles    = env_cfg['n_obstacles']
-        cfg.bin_size       = env_cfg['bin_size']
-        cfg.wall_thickness = env_cfg['wall_thickness']
-        cfg.friction       = env_cfg['friction']
+        cfg.n_obstacles = n_obs
+        # bin_size, wall_thickness, friction stay from pipeline.yaml config
 
     print(f'[MPC-server] {scenario_name}: running puzzle planning '
           f'(n_obstacles={cfg.n_obstacles}, bin_size={cfg.bin_size}) …')
@@ -629,7 +641,6 @@ def _run_isaaclabmpc_pull_scenario(scenario_name: str, out_dir: Path,
     solution_path = out_dir / 'solutions' / f'{scenario_name}.json'
     if worker_result is None or not solution_path.exists():
         print(f'[MPC-server] {scenario_name}: puzzle planning failed — aborting MPC')
-        client.close()
         planner_proc.kill()
         return MpcResult(scenario_name=scenario_name, success=False,
                          steps_completed=0, total_steps=0, elapsed_time_s=0.0), initial_state
@@ -644,10 +655,9 @@ def _run_isaaclabmpc_pull_scenario(scenario_name: str, out_dir: Path,
     print(f'[MPC-server] {scenario_name}: injecting {len(solution_data["steps"])} '
           f'steps via reset_episode …')
     try:
-        client.reset_episode(steps_json)
+        proxy.reset_episode(steps_json)
     except Exception as e:
         print(f'[MPC-server] {scenario_name}: reset_episode failed: {e}')
-    client.close()
 
     # ── 6. Launch world.py ───────────────────────────────────────────────────
     world_cmd = [
