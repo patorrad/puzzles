@@ -29,8 +29,6 @@ import torch
 
 from simulators.placement import make_state
 
-SIM = os.environ.get('SIM', 'genesis')
-
 # Physics constants (must match genesis_env.py)
 BIN_D    = 1.0
 EXIT_Y   = -0.05
@@ -74,17 +72,6 @@ _PARKED = [(0.85, 0.1), (0.85, 0.9)]
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
-
-@pytest.fixture(scope='session')
-def env():
-    """Single env for the whole test session (GPU init once). Simulator selected by SIM env var."""
-    if SIM == 'isaaclab':
-        os.environ.setdefault('ISAACLAB_HEADLESS', '1')
-        from simulators.isaaclab_env import BinEnvIsaacLab
-        return BinEnvIsaacLab(n_obstacles=2, show_viewer=False, n_envs=1, bin_size=1.0)
-    else:
-        from simulators.genesis_env import BinEnv as BinEnvGenesis
-        return BinEnvGenesis(n_obstacles=2, show_viewer=False, n_envs=1, bin_size=1.0)
 
 
 # ---------------------------------------------------------------------------

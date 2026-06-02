@@ -230,7 +230,7 @@ def random_initial_state(
     return state
 
 
-def make_state(target_xy: tuple, obstacle_xys: list, obj_size: float) -> dict:
+def make_state(target_xy: tuple, obstacle_xys: list, obj_size: float = 0.05) -> dict:
     """
     Build a state dict from (x, y) tuples; z is set to obj_size/2 for all objects.
 
