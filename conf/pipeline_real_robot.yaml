@@ -2,12 +2,13 @@ defaults:
   - pipeline
   - _self_
 
-viewer: always
+viewer: headless
 
 # Server mode: pull env setup from the running planner instead of a YAML.
 # Usage: python pipeline.py --config-name=pipeline scenario_source=server
 scenario_source: server
 server_scenario_name: server_scenario
+scenario_file: null
 
 show_mpc_planner_viewer: false  # open Isaac viewer during puzzle planning (planner.py / puzzle solver)
 show_mpc_world_viewer: true     # open Isaac viewer during MPC execution (world.py)

@@ -596,7 +596,7 @@ def _run_real_robot_scenario(scenario_name: str, out_dir: Path,
         # Exit faces camera (+MPPI_x), so NS = BIN_D - (MPPI_x - BIN_OFF_X).
         # Offsets are empirical — re-measure after repositioning the bin.
         BIN_D = 0.27
-        return [BIN_D - wp[0] + 0.35, wp[1] - 0.075, wp[2] - 1.025]
+        return [ (wp[0] - 0.35), wp[1] - 0.14, wp[2] - 1.225]
 
     positions_bin = [_world_to_bin(raw_poses[i * 7: i * 7 + 3].tolist()) for i in range(n_objects)]
     quats         = [raw_poses[i * 7 + 3: i * 7 + 7].tolist()            for i in range(n_objects)]

@@ -17,7 +17,7 @@ difficult_spawn: false
 # Override config.yaml defaults for isaaclabmpc compatibility
 wall_thickness: 0.02
 friction: 1.2
-parallel_envs: 8
+parallel_envs: 128
 viewer: headless
 
 # Puzzle solver child process (null = wait indefinitely)
