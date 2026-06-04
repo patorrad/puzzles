@@ -39,8 +39,8 @@ class SimulatorEnv(ABC):
         Whether objects can be stacked
     friction : float
         Friction coefficient
-    n_z_levels : int
-        Number of discrete push heights
+    max_stack_height : int
+        Maximum objects per column in random placement (1 = floor only)
     push_steps : int
         Number of steps for a push action
     substeps : int
@@ -52,7 +52,7 @@ class SimulatorEnv(ABC):
     def __init__(self, n_obstacles: int = 2, n_envs: int = 1,
                  dt: float = 0.01, seed: Optional[int] = None,
                  stackable: bool = False, friction: float = 1.0,
-                 n_z_levels: int = 1,
+                 max_stack_height: int = 1,
                  push_steps: int = 20, substeps: int = 4,
                  wall_thickness: float = 0.05,
                  difficult_spawn: bool = False,
@@ -72,7 +72,7 @@ class SimulatorEnv(ABC):
         self.friction = friction
         self.dt = dt
         self.stackable = stackable
-        self.n_z_levels = n_z_levels
+        self.max_stack_height = max_stack_height
         self.target_z_level = target_z_level
         self.force_obstacle_on_target = force_obstacle_on_target
         self.push_steps = push_steps
@@ -90,10 +90,6 @@ class SimulatorEnv(ABC):
         # Single-env only (n_envs=1)
         if self.n_envs == 1 and seed is not None:
             torch.manual_seed(seed)
-
-        # Discrete z levels: floor height, one-box up, two-boxes up, ...
-        # This will be set by subclasses based on OBJ_H and OBJ_SIZE
-        self.z_levels = []
 
         # Sim run counters (incremented by batch_evaluate; reset by benchmark)
         self.batch_calls: int = 0

@@ -67,7 +67,7 @@ class BinEnvIsaacGym(SimulatorEnv):
     seed : int | None
     stackable : bool
     friction : float
-    n_z_levels : int
+    max_stack_height : int
     push_steps : int
     substeps : int
     """
@@ -75,7 +75,7 @@ class BinEnvIsaacGym(SimulatorEnv):
     def __init__(self, n_obstacles: int = 2, n_envs: int = 1,
                  dt: float = 0.01, seed: int | None = None,
                  stackable: bool = False, friction: float = 1.0,
-                 n_z_levels: int = 1,
+                 max_stack_height: int = 1,
                  push_steps: int = 20, substeps: int = 4,
                  wall_thickness: float = WALL_T,
                  difficult_spawn: bool = False,
@@ -89,7 +89,7 @@ class BinEnvIsaacGym(SimulatorEnv):
         super().__init__(n_obstacles=n_obstacles, n_envs=n_envs,
                          dt=dt, seed=seed,
                          stackable=stackable, friction=friction,
-                         n_z_levels=n_z_levels, push_steps=push_steps,
+                         max_stack_height=max_stack_height, push_steps=push_steps,
                          substeps=substeps, wall_thickness=wall_thickness,
                          difficult_spawn=difficult_spawn, reward_cfg=reward_cfg,
                          bin_size=bin_size, bin_size_factor=bin_size_factor,
@@ -100,8 +100,6 @@ class BinEnvIsaacGym(SimulatorEnv):
 
         _park_y = -(max(self.bin_w, self.bin_d) * 1.5 + 0.1)
         self._park = [self.bin_w / 2, _park_y, self._OBJ_H]
-        self.z_levels = [self._OBJ_H + i * self._OBJ_SIZE for i in range(n_z_levels)]
-
         # Number of actors per env: floor + 3 walls + 2 pushers + 1 target + n_obstacles
         self.n_actors_per_env = 7 + n_obstacles
 

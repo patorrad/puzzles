@@ -118,7 +118,7 @@ class BinEnvIsaacLab(SimulatorEnv):
     seed : int | None
     stackable : bool
     friction : float
-    n_z_levels : int
+    max_stack_height : int
     push_steps : int
     substeps : int
     """
@@ -126,7 +126,7 @@ class BinEnvIsaacLab(SimulatorEnv):
     def __init__(self, n_obstacles: int = 2, n_envs: int = 1,
                  dt: float = 0.01, seed: int | None = None,
                  stackable: bool = False, friction: float = 1.0,
-                 n_z_levels: int = 1,
+                 max_stack_height: int = 1,
                  push_steps: int = 20, substeps: int = 4,
                  wall_thickness: float = WALL_T,
                  difficult_spawn: bool = False,
@@ -155,7 +155,7 @@ class BinEnvIsaacLab(SimulatorEnv):
             n_obstacles=n_obstacles, n_envs=n_envs,
             dt=dt, seed=seed,
             stackable=stackable, friction=friction,
-            n_z_levels=n_z_levels, push_steps=push_steps,
+            max_stack_height=max_stack_height, push_steps=push_steps,
             substeps=substeps, wall_thickness=wall_thickness,
             difficult_spawn=difficult_spawn, reward_cfg=reward_cfg,
             bin_size=bin_size, bin_size_factor=bin_size_factor,
@@ -184,7 +184,6 @@ class BinEnvIsaacLab(SimulatorEnv):
 
         _park_x = -(max(self.bin_w, self.bin_d) * 1.5 + 0.1)
         self._park = [_park_x, self.bin_w / 2, self._OBJ_H]  # x=NS behind bin, y=EW center
-        self.z_levels = [self._OBJ_H + i * self._OBJ_SIZE for i in range(n_z_levels)]
         self.device   = "cuda" if torch.cuda.is_available() else "cpu"
 
         # Compute per-env world origins so envs don't overlap.
@@ -621,7 +620,7 @@ class BinEnvIsaacLab(SimulatorEnv):
             bin_w=self.bin_w,
             bin_d=self.bin_d,
             debug=self.debug,
-            n_z_levels=self.n_z_levels,
+            max_stack_height=self.max_stack_height,
             target_z_level=self.target_z_level,
             force_obstacle_on_target=self.force_obstacle_on_target,
         )

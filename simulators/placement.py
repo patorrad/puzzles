@@ -23,7 +23,7 @@ def _place_objects_once(
     bin_w: float,
     bin_d: float,
     obj_size: float,
-    n_z_levels: int = 1,
+    max_stack_height: int = 1,
     target_z_level: int | None = None,
     force_obstacle_on_target: bool = False,
 ) -> dict:
@@ -45,8 +45,8 @@ def _place_objects_once(
         is_target = (obj_i == n_obstacles)
         if is_target and _target_z is None:
             # Pick randomly from levels that have eligible columns, falling back to 0.
-            eligible_levels = sorted({c[2] for c in columns if c[2] < n_z_levels})
-            if eligible_levels and n_z_levels > 1:
+            eligible_levels = sorted({c[2] for c in columns if c[2] < max_stack_height})
+            if eligible_levels and max_stack_height > 1:
                 _target_z = int(eligible_levels[int(torch.randint(len(eligible_levels), (1,)).item())])
             else:
                 _target_z = 0
@@ -69,7 +69,7 @@ def _place_objects_once(
 
         if not placed:
             sep = obj_size * 1.05  # minimum column separation
-            can_stack = (stackable or n_z_levels > 1) and not is_target
+            can_stack = stackable and not is_target
             for _ in range(500):
                 x = torch.empty(1).uniform_(obj_x_lo, x_hi).item()
                 y = torch.empty(1).uniform_(y_lo, y_hi).item()
@@ -80,7 +80,7 @@ def _place_objects_once(
                     nearby = [
                         (i, c) for i, c in enumerate(columns)
                         if ((x - c[0]) ** 2 + (y - c[1]) ** 2) ** 0.5 < sep
-                        and c[2] < n_z_levels
+                        and c[2] < max_stack_height
                     ]
                     if nearby:
                         choice_i, (cx, cy, count) = min(
@@ -114,7 +114,7 @@ def _place_objects_once(
                     break
 
     # Force one obstacle directly on top of the target if requested and there is room above it.
-    if force_obstacle_on_target and n_obstacles > 0 and _target_z is not None and _target_z + 1 < n_z_levels:
+    if force_obstacle_on_target and n_obstacles > 0 and _target_z is not None and _target_z + 1 < max_stack_height:
         target_x, target_y = positions[n_obstacles][0], positions[n_obstacles][1]
         above_z = obj_h + obj_size * (_target_z + 1)
         sep = obj_size * 1.05
@@ -163,7 +163,7 @@ def random_initial_state(
     bin_d: Optional[float] = None,
     max_attempts: int = 200,
     debug: bool = False,
-    n_z_levels: int = 1,
+    max_stack_height: int = 1,
     target_z_level: Optional[int] = None,
     force_obstacle_on_target: bool = False,
 ) -> dict:
@@ -212,7 +212,7 @@ def random_initial_state(
     state = None
     for attempt in range(attempts):
         state = _place_objects_once(n_obstacles, stackable, difficult_spawn, bin_w, bin_d,
-                                    obj_size, n_z_levels,
+                                    obj_size, max_stack_height,
                                     target_z_level=target_z_level,
                                     force_obstacle_on_target=force_obstacle_on_target)
         if not difficult_spawn:

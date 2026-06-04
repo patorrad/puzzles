@@ -1,5 +1,6 @@
 n_obstacles: 5
-n_z_levels: 2
+stackable: true
+max_stack_height: 2
 target_z_level: 1   # target is in the middle of the stack
 
 # All three objects share the same (NS, EW) column.

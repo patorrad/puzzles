@@ -69,7 +69,7 @@ class BinEnv(SimulatorEnv):
     seed : int | None
     stackable : bool
     friction : float
-    n_z_levels : int
+    max_stack_height : int
         Number of discrete push heights (1 = floor only).
     push_steps : int
     substeps : int
@@ -78,7 +78,7 @@ class BinEnv(SimulatorEnv):
     def __init__(self, n_obstacles: int = 2, n_envs: int = 1,
                  dt: float = 0.01, seed: int | None = None,
                  stackable: bool = False, friction: float = 1.0,
-                 n_z_levels: int = 1,
+                 max_stack_height: int = 1,
                  push_steps: int = 20, substeps: int = 4,
                  wall_thickness: float = WALL_T,
                  difficult_spawn: bool = False,
@@ -96,7 +96,7 @@ class BinEnv(SimulatorEnv):
 
         super().__init__(n_obstacles=n_obstacles, n_envs=n_envs,
                          dt=dt, seed=seed, stackable=stackable, friction=friction,
-                         n_z_levels=n_z_levels, push_steps=push_steps, substeps=substeps,
+                         max_stack_height=max_stack_height, push_steps=push_steps, substeps=substeps,
                          wall_thickness=wall_thickness, difficult_spawn=difficult_spawn,
                          reward_cfg=reward_cfg, bin_size=bin_size,
                          bin_size_factor=bin_size_factor, obj_size=obj_size, debug=debug)
@@ -105,8 +105,6 @@ class BinEnv(SimulatorEnv):
         self._pusher_w = self._OBJ_SIZE * 0.88
 
         self._park = [-0.3, self.bin_d / 2, self._OBJ_H]
-        self.z_levels = [self._OBJ_H + i * self._OBJ_SIZE for i in range(n_z_levels)]
-
         self._build_scene()
 
     # ------------------------------------------------------------------

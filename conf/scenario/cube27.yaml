@@ -1,5 +1,6 @@
 n_obstacles: 26
-n_z_levels: 3
+stackable: true
+max_stack_height: 3
 target_z_level: 1   # target is the center block of the 3×3×3 cube
 bin_size: 0.6
 friction: 1.2

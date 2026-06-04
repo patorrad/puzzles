@@ -121,6 +121,9 @@ def _puzzle_worker(cfg: DictConfig, scenarios: list, out_dir: Path, q) -> None:
             result.final_reward = sum(result.reward_components.values())
             result.replay_success = env.is_goal(final_state)
 
+            if planner_viewer_mode != 'headless':
+                env.replay(plan, initial_state)
+
             solution_path = out_dir / 'solutions' / f'{scenario_name}.json'
             save_solution(str(solution_path), plan, initial_state, cfg, env)
 
@@ -195,7 +198,7 @@ def _generate_scenarios(cfg: DictConfig, outdir: Path) -> list[tuple[str, dict]]
             seed=seed,
             bin_w=bin_size,
             bin_d=bin_size,
-            n_z_levels=cfg.get('n_z_levels', 1),
+            max_stack_height=cfg.get('max_stack_height', 1),
             target_z_level=cfg.get('target_z_level', None),
         )
         name = f"scenario_{i:04d}"
@@ -428,10 +431,11 @@ def _run_isaaclabmpc(scenario_name: str, scenario_yaml: Path, solution_json: Pat
     planner_cmd = [
         python,
         str(ilab_dir / 'planner.py'),
-        '--scenario', str(scenario_yaml),
         '--solution_path', str(solution_json),
         '--telemetry_path', str(telemetry_json),
     ]
+    if scenario_yaml is not None:
+        planner_cmd += ['--scenario', str(scenario_yaml)]
     if not show_planner_viewer:
         planner_cmd.append('--headless')
     world_cmd = [
@@ -650,12 +654,6 @@ def _run_real_robot_scenario(scenario_name: str, out_dir: Path,
     for pr in worker_result.get('puzzle_results', []):
         print(f'[real-robot] puzzle result: success={pr.success} plan_len={pr.plan_length}')
 
-    with open(solution_path) as f:
-        solution_data = json.load(f)
-    steps_json = json.dumps(solution_data['steps'])
-    print(f'[real-robot] injecting {len(solution_data["steps"])} steps via reset_episode …')
-    client.reset_episode(steps_json)
-
     server_proc.send_signal(signal.SIGTERM)
     try:
         server_proc.wait(timeout=5)
@@ -663,13 +661,8 @@ def _run_real_robot_scenario(scenario_name: str, out_dir: Path,
         server_proc.kill()
     print(f'[real-robot] bridge_server stopped')
 
-    return MpcResult(
-        scenario_name=scenario_name,
-        success=True,
-        steps_completed=0,
-        total_steps=len(solution_data['steps']),
-        elapsed_time_s=0.0,
-    ), initial_state
+    mpc_result = _run_isaaclabmpc(scenario_name, None, solution_path, out_dir, cfg)
+    return mpc_result, initial_state
 
 
 def _log_mpc_wandb(result: MpcResult, step: int, initial_state=None,
@@ -787,8 +780,8 @@ def main(cfg: DictConfig) -> None:
 
         with open_dict(cfg):
             cfg.n_scenarios  = 1
-            cfg.n_obstacles  = len(initial_state['obstacle_pos'])
-            cfg.n_z_levels   = _sc_meta.get('n_z_levels', _inferred_z_levels)
+            cfg.n_obstacles      = len(initial_state['obstacle_pos'])
+            cfg.max_stack_height = _sc_meta.get('max_stack_height', _inferred_z_levels)
             if 'bin_size'       in _sc_meta: cfg.bin_size       = _sc_meta['bin_size']
             if 'wall_thickness' in _sc_meta: cfg.wall_thickness = _sc_meta['wall_thickness']
             if 'friction'       in _sc_meta: cfg.friction       = _sc_meta['friction']

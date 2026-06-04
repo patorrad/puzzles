@@ -54,7 +54,7 @@ def _sample_action(state: dict, env: SimulatorEnv,
       action_type : 'push_n' | 'pull_s' | 'push_e' | 'push_w'
       obj_idx     : int   – 0 = target, 1..N = obstacles
       push_pos    : (2,)  – xy position of chosen object
-      push_z      : float – discrete z level from env.z_levels
+      push_z      : float – z-center of the selected object
     """
     # Build (N+1, 3) position array: [target, obs0, obs1, ...]
     all_pos_3d = torch.stack([
@@ -73,9 +73,7 @@ def _sample_action(state: dict, env: SimulatorEnv,
 
     push_pos = all_pos_3d[obj_idx, :2]
 
-    # Snap z to the selected object's actual height
-    obj_z  = float(all_pos_3d[obj_idx, 2])
-    push_z = min(env.z_levels, key=lambda z: abs(z - obj_z))
+    push_z = float(all_pos_3d[obj_idx, 2])
 
     # Sample action type
     weights = action_weights if action_weights is not None else _WEIGHTS_DEFAULT

@@ -225,7 +225,7 @@ def _launch_replay(plan, initial_state, cfg: DictConfig):
         f'simulator={cfg.simulator.name}',
         f'n_obstacles={cfg.n_obstacles}',
         f'friction={cfg.friction}',
-        f'n_z_levels={cfg.n_z_levels}',
+        f'max_stack_height={cfg.max_stack_height}',
         f'push_steps={cfg.push_steps}',
         f'substeps={cfg.substeps}',
         f'wall_thickness={cfg.wall_thickness}',
@@ -279,7 +279,7 @@ def main(cfg: DictConfig) -> None:
         from omegaconf import OmegaConf, open_dict
         sc = cfg.scenario
         with open_dict(cfg):
-            for key in ('n_obstacles', 'n_z_levels', 'target_z_level',
+            for key in ('n_obstacles', 'max_stack_height', 'target_z_level',
                         'stackable', 'difficult_spawn',
                         'bin_size', 'wall_thickness', 'friction'):
                 if key in sc:
