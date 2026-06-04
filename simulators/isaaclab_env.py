@@ -137,6 +137,8 @@ class BinEnvIsaacLab(SimulatorEnv):
                  force_threshold: float = 100.0,
                  position_iterations: int = 4,
                  velocity_iterations: int = 1,
+                 max_depenetration_velocity: float = 5.0,
+                 settle_depenetration_velocity: float | None = None,
                  env_spacing_factor: float = 2.5,
                  post_teleport_steps: int = 10,
                  teleport_settle_steps: int = 3,
@@ -171,6 +173,8 @@ class BinEnvIsaacLab(SimulatorEnv):
         self.force_threshold = force_threshold
         self.position_iterations = position_iterations
         self.velocity_iterations = velocity_iterations
+        self.max_depenetration_velocity = max_depenetration_velocity
+        self.settle_depenetration_velocity = settle_depenetration_velocity
         self.post_teleport_steps = post_teleport_steps
         self.teleport_settle_steps = teleport_settle_steps
         self.post_push_steps = post_push_steps
@@ -268,6 +272,7 @@ class BinEnvIsaacLab(SimulatorEnv):
                 kinematic_enabled=kinematic,
                 disable_gravity=kinematic,
                 solver_position_iteration_count=pos_iters,
+                max_depenetration_velocity=self.max_depenetration_velocity,
             ),
             mass_props=sim_utils.MassPropertiesCfg(mass=mass),
             collision_props=sim_utils.CollisionPropertiesCfg(
@@ -400,6 +405,12 @@ class BinEnvIsaacLab(SimulatorEnv):
                 self._spawn_prim(f"{ep}/Obstacle{oi}", obs_cfgs[oi],
                                  self._local_to_world([x0 + (oi + 1) * step,
                                                        bd / 2, self._OBJ_H], ei))
+
+        self._dynamic_prim_paths = (
+            [f"/World/envs/env_{ei}/Target" for ei in range(self.n_envs)]
+            + [f"/World/envs/env_{ei}/Obstacle{oi}"
+               for ei in range(self.n_envs) for oi in range(self.n_obstacles)]
+        )
 
         # Wrap dynamic prims in batched RigidObject views.
         # spawn=None means "attach to existing prims, do not re-spawn".
@@ -863,6 +874,11 @@ class BinEnvIsaacLab(SimulatorEnv):
         # Repeated-teleport settle: re-write all objects to target positions after every
         # step so the contact manifold builds up against the correct configuration rather
         # than stale PhysX warm-start impulses from the prior frame.
+        _settle_vel = self.settle_depenetration_velocity
+        _swap_vel = _settle_vel is not None and _settle_vel != self.max_depenetration_velocity
+        if _swap_vel:
+            self._set_depenetration_velocity(_settle_vel)
+
         for _ in range(self.teleport_settle_steps):
             self._step_sim(render=False)
             self._set_state_batch(states_k, env_ids_k)
@@ -870,6 +886,9 @@ class BinEnvIsaacLab(SimulatorEnv):
         # Free settle — lets objects find their resting contact.
         for _ in range(self.post_teleport_steps):
             self._step_sim(render=False)
+
+        if _swap_vel:
+            self._set_depenetration_velocity(self.max_depenetration_velocity)
 
         # 2. Warm-up: place pushers at stroke start, settle 2 ticks
         for env_idx, (ptype, start, _) in enumerate(strokes):
@@ -1026,6 +1045,14 @@ class BinEnvIsaacLab(SimulatorEnv):
 
     def step_physics(self) -> None:
         self._step_sim(render=False)
+
+    def _set_depenetration_velocity(self, vel: float) -> None:
+        from pxr import PhysxSchema
+        stage = self.sim.stage
+        for path in self._dynamic_prim_paths:
+            api = PhysxSchema.PhysxRigidBodyAPI(stage.GetPrimAtPath(path))
+            if api:
+                api.GetMaxDepenetrationVelocityAttr().Set(vel)
 
     # ------------------------------------------------------------------
     # Replay
