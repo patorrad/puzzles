@@ -422,6 +422,8 @@ def _run_isaaclabmpc(scenario_name: str, scenario_yaml: Path, solution_json: Pat
     python = sys.executable
     show_planner_viewer = cfg.get('show_mpc_planner_viewer', False)
     show_world_viewer   = cfg.get('show_mpc_world_viewer', False)
+    use_real_world      = cfg.get('use_real_world', False)
+    world_script        = 'real_world.py' if use_real_world else 'world.py'
 
     planner_cmd = [
         python,
@@ -434,7 +436,7 @@ def _run_isaaclabmpc(scenario_name: str, scenario_yaml: Path, solution_json: Pat
         planner_cmd.append('--headless')
     world_cmd = [
         python,
-        str(ilab_dir / 'world.py'),
+        str(ilab_dir / world_script),
         '--scenario', str(scenario_yaml),
         '--n_steps', str(cfg.isaaclabmpc_n_steps),
         '--output_path', str(result_json),
