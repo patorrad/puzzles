@@ -41,6 +41,7 @@ def build_env(cfg, n_envs: int, viewer_mode: str = 'replay'):
         post_push_steps=getattr(cfg.simulator, 'post_push_steps', 15),
         max_depenetration_velocity=getattr(cfg.simulator, 'max_depenetration_velocity', 5.0),
         settle_depenetration_velocity=getattr(cfg.simulator, 'settle_depenetration_velocity', None),
+        enable_stabilization=getattr(cfg.simulator, 'enable_stabilization', False),
         bin_size=cfg.get('bin_size', None),
         bin_size_factor=cfg.get('bin_size_factor', 0.9),
         obj_size=cfg.get('obj_size', 0.05),

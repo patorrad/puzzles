@@ -2,7 +2,7 @@ defaults:
   - pipeline
   - _self_
 
-viewer: headless
+viewer: replay
 
 # Server mode: pull env setup from the running planner instead of a YAML.
 # Usage: python pipeline.py --config-name=pipeline scenario_source=server

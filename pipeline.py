@@ -113,6 +113,10 @@ def _puzzle_worker(cfg: DictConfig, scenarios: list, out_dir: Path, q) -> None:
 
     for i, (scenario_name, initial_state) in enumerate(scenarios):
         seed = (cfg.seed + i) if cfg.seed is not None else i
+        if planner_viewer_mode != 'headless' and hasattr(env, 'wait_for_input'):
+            env.set_state(initial_state, env_idx=0)
+            env.sim.step(render=True)
+            env.wait_for_input(f'  [Scenario {i + 1}/{cfg.n_scenarios}: {scenario_name}] Press Enter to start MCTS rollouts …')
         result, plan = _plan_scenario(env, cfg, i, scenario_name, initial_state, seed)
 
         if plan is not None:
@@ -616,6 +620,30 @@ def _run_real_robot_scenario(scenario_name: str, out_dir: Path,
         'obstacle_quat': torch.tensor(quats[1:]),
     }
 
+    # Shift the whole scene so the target lands at bin centre (x-y only; z unchanged).
+    # Preserves relative layout of all objects.
+    bin_s   = cfg.get('bin_size', 0.3)
+    centre  = bin_s / 2
+    shift_x = centre - float(initial_state['target_pos'][0])
+    shift_y = centre - float(initial_state['target_pos'][1])
+    initial_state['target_pos'][0] += shift_x
+    initial_state['target_pos'][1] += shift_y
+    if initial_state['obstacle_pos'].numel() > 0:
+        initial_state['obstacle_pos'][:, 0] += shift_x
+        initial_state['obstacle_pos'][:, 1] += shift_y
+    print(f'[real-robot] centre-shifted scene by ({shift_x:+.4f}, {shift_y:+.4f}) m')
+
+    obj_s    = cfg.get('obj_size', 0.05)
+    bottom_z = obj_s / 2  # centre z of a cube resting on the floor
+    all_z    = [float(initial_state['target_pos'][2])]
+    if initial_state['obstacle_pos'].numel() > 0:
+        all_z += initial_state['obstacle_pos'][:, 2].tolist()
+    shift_z = bottom_z - min(all_z)
+    initial_state['target_pos'][2] += shift_z
+    if initial_state['obstacle_pos'].numel() > 0:
+        initial_state['obstacle_pos'][:, 2] += shift_z
+    print(f'[real-robot] z-shifted scene by {shift_z:+.4f} m (lowest object now at z={bottom_z:.4f})')
+
     print(f'[real-robot] object states (bin frame) being passed to MCTS:')
     print(f'  target   pos={[f"{v:.4f}" for v in positions_bin[0]]}  quat={[f"{v:.4f}" for v in quats[0]]}')
     for i, (pos, quat) in enumerate(zip(positions_bin[1:], quats[1:])):
@@ -643,6 +671,8 @@ def _run_real_robot_scenario(scenario_name: str, out_dir: Path,
     except OSError:
         pass
     proc.join(timeout=5)
+    pq.cancel_join_thread()
+    pq.close()
 
     solution_path = out_dir / 'solutions' / f'{scenario_name}.json'
     if worker_result is None or not solution_path.exists():
@@ -885,6 +915,8 @@ def main(cfg: DictConfig) -> None:
             except OSError as e:
                 print(f'[pipeline] Puzzle worker already exited before kill: {e}')
             proc.join(timeout=5)
+            q.cancel_join_thread()
+            q.close()
 
             if worker_result is not None:
                 initial_state_by_name[scenario_name] = initial_state
@@ -1077,6 +1109,8 @@ def main(cfg: DictConfig) -> None:
         except OSError as e:
             print(f'[pipeline] Puzzle worker already exited before kill: {e}')
         proc.join(timeout=5)
+        q.cancel_join_thread()
+        q.close()
 
         successful: list[tuple[str, Path]] = []
 

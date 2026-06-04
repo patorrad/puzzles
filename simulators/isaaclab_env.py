@@ -139,6 +139,7 @@ class BinEnvIsaacLab(SimulatorEnv):
                  velocity_iterations: int = 1,
                  max_depenetration_velocity: float = 5.0,
                  settle_depenetration_velocity: float | None = None,
+                 enable_stabilization: bool = False,
                  env_spacing_factor: float = 2.5,
                  post_teleport_steps: int = 10,
                  teleport_settle_steps: int = 3,
@@ -175,6 +176,7 @@ class BinEnvIsaacLab(SimulatorEnv):
         self.velocity_iterations = velocity_iterations
         self.max_depenetration_velocity = max_depenetration_velocity
         self.settle_depenetration_velocity = settle_depenetration_velocity
+        self.enable_stabilization = enable_stabilization
         self.post_teleport_steps = post_teleport_steps
         self.teleport_settle_steps = teleport_settle_steps
         self.post_push_steps = post_push_steps
@@ -236,6 +238,7 @@ class BinEnvIsaacLab(SimulatorEnv):
             device=self.device,
             physx=PhysxCfg(
                 enable_ccd=False,
+                enable_stabilization=self.enable_stabilization,
                 min_position_iteration_count=self.position_iterations,
                 min_velocity_iteration_count=self.velocity_iterations,
                 enable_external_forces_every_iteration=True,
@@ -597,18 +600,27 @@ class BinEnvIsaacLab(SimulatorEnv):
     def wait_for_input(self, prompt: str = '  [Press Enter to continue...]') -> None:
         """Keep the Isaac Sim viewport live while waiting for the user to press Enter.
 
-        Spins on sim.render() + non-blocking stdin poll so the viewer stays
-        interactive (plain input() would freeze the UI thread).
+        Spins on sim.render() + non-blocking /dev/tty poll so the viewer stays
+        interactive (plain input() would freeze the UI thread). Uses /dev/tty
+        directly so this works in spawned child processes where stdin is closed.
         """
-        import sys
         import select
         print(prompt, flush=True)
-        while True:
-            self.sim.render()
-            ready, _, _ = select.select([sys.stdin], [], [], 0)
-            if ready:
-                sys.stdin.readline()
-                break
+        try:
+            tty = open('/dev/tty', 'r')
+        except OSError:
+            import sys
+            tty = sys.stdin
+        try:
+            while True:
+                self.sim.render()
+                ready, _, _ = select.select([tty], [], [], 0)
+                if ready:
+                    tty.readline()
+                    break
+        finally:
+            if tty is not __import__('sys').stdin:
+                tty.close()
 
     # ------------------------------------------------------------------
     # Object placement (single mode only)
@@ -1070,7 +1082,7 @@ class BinEnvIsaacLab(SimulatorEnv):
         for _ in range(5):
             self._step_sim()
 
-        input('Press Enter to start replay...')
+        self.wait_for_input('Press Enter to start replay...')
 
         state = initial_state
         done  = False
@@ -1088,7 +1100,7 @@ class BinEnvIsaacLab(SimulatorEnv):
         self._force_render = False
         if not done:
             logger.info('  Plan executed (target may not have fully escaped).')
-        input('Press Enter to close...')
+        self.wait_for_input('Press Enter to close...')
 
     def record_replay(
         self,
