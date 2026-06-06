@@ -445,15 +445,17 @@ def _run_isaaclabmpc(scenario_name: str, scenario_yaml: Path, solution_json: Pat
     world_cmd = [
         python,
         str(ilab_dir / world_script),
-        '--scenario', str(scenario_yaml),
         '--n_steps', str(cfg.isaaclabmpc_n_steps),
         '--output_path', str(result_json),
     ]
+    if scenario_yaml is not None:
+        world_cmd += ['--scenario', str(scenario_yaml)]
     if not show_world_viewer:
         world_cmd.append('--headless')
 
     print(f'\n[MPC] {scenario_name}: cwd={ilab_dir.parent.parent}')
-    print(f'[MPC] {scenario_name}: scenario_yaml exists={scenario_yaml.exists()} path={scenario_yaml}')
+    yaml_exists = scenario_yaml.exists() if scenario_yaml is not None else None
+    print(f'[MPC] {scenario_name}: scenario_yaml exists={yaml_exists} path={scenario_yaml}')
     print(f'[MPC] {scenario_name}: solution_json exists={solution_json.exists()} path={solution_json}')
     print(f'[MPC] {scenario_name}: planner cmd: {" ".join(planner_cmd)}')
 

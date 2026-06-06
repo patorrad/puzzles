@@ -40,7 +40,8 @@ resume_dir: null
 # IsaacLab MPC subprocesses
 isaaclabmpc_timeout_s: 300
 isaaclabmpc_n_steps: 10000
-isaaclabmpc_dir: /home/jack/research/isaaclabmpc/examples/ur16e_reach_stand_blocks_jack
+# isaaclabmpc_dir: /home/jack/research/isaaclabmpc/examples/ur16e_reach_stand_blocks_jack
+isaaclabmpc_dir: /home/paolo/Documents/isaaclabmpc/examples/ur16e_stacked_robot
 show_mpc_planner_viewer: false  # open Isaac viewer during puzzle planning (planner.py / puzzle solver)
 show_mpc_world_viewer: true     # open Isaac viewer during MPC execution (world.py)
 
