@@ -288,6 +288,9 @@ class _PlannerBase:
         """Instantiate the correct planner from a Hydra config."""
         aw = cfg.planner.get('action_weights', None)
         prune = cfg.get('prune_plan', False)
+        if cfg.planner.name == 'ighastar':
+            from planner_ighastar import IGHAStarPusher
+            return IGHAStarPusher.from_cfg(env, cfg, seed)
         if cfg.planner.name == 'mcts':
             return MCTSPusher(
                 env=env,

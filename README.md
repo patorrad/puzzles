@@ -28,6 +28,8 @@ Genesis 0.3.11, CUDA, PyTorch 2.9.1+cu130
 |---|---|
 | [env.py](env.py) | `BinEnv` — single Genesis scene, kinematic NS+EW pusher blades |
 | [planner.py](planner.py) | `MCTSPusher`, `RRTPusher`, `ParallelMCTSPusher`, `ParallelRRTPusher` |
+| [planner_ighastar.py](planner_ighastar.py) | `IGHAStarPusher` — IGHA* search planner (uses the generic IGHA* env) |
+| [ighastar_bridge.py](ighastar_bridge.py) | `BinIGHAStarBridge` — adapts `SimulatorEnv` to IGHA*'s generic-env callbacks |
 | [main.py](main.py) | CLI entry point — plan, replay, save solution |
 | [apply_solution.py](apply_solution.py) | Convert `solution.json` → genesismpc actor YAMLs + config |
 | [train_value.py](train_value.py) | Collect MCTS tree data and train an MLP value function | Not working at the moment
@@ -70,6 +72,97 @@ python main.py --planner rrt --visualize
 | `--seed` | `None` | Random seed for reproducibility |
 | `--save FILE` | — | Export solution + scene to JSON |
 | `--no-replay` | — | Skip viewer replay after planning |
+
+## IGHA* planner
+
+`IGHAStarPusher` is a third planner (alongside `mcts` / `rrt`) that runs the
+**IGHA\*** search algorithm over the discretised bin state, using the simulator
+(`SimulatorEnv.batch_evaluate`) as a black-box forward model — so it works with
+any backend (`isaaclab`, `genesis`, `isaacgym`) and produces the same
+`list[dict]` action format (verify / replay / save all work unchanged).
+
+Each node carries the **full object pose losslessly** — `xy + z + quaternion`
+for every object (`N_DIMS = 7*(1+n_obstacles)`) — so the search never fabricates
+or resets a node's true state. IGHA\* only **grids/dedups a leading subspace**
+(`HASH_DIMS`): by default `grid_z=true` grids each object's `[x, y, z]`
+(`HASH_DIMS = 3*(1+n_obstacles)`); set `grid_z=false` to grid `[x, y]` only
+(`2*(1+n_obstacles)`). The orientation (quaternion) always rides along for the
+dynamics (`set_state`) without being discretised. Controls are discrete
+macro-actions `(action_type, obj_idx, z_level)`. The goal is the same as the
+other planners: target out the open −y face (`target_y <= EXIT_Y`) with no
+obstacle dropped.
+
+### Setup (one-time)
+
+IGHA\* is a separate C++/pybind package, JIT-built on first use via
+`torch.utils.cpp_extension`. Requirements:
+
+- The **IGHAStar** repo on its `generalized_version` branch (it must contain
+  `ighastar/src/Environments/include/generic.h`). By default it is expected as a
+  sibling of this repo (`../IGHAStar`); otherwise set `IGHASTAR_ROOT`:
+  ```bash
+  export IGHASTAR_ROOT=/path/to/IGHAStar
+  ```
+- A C++17 compiler (`g++`), `ninja`, and **Boost headers** (header-only
+  `boost::hash_combine`). `planner_ighastar.py` auto-discovers a Boost include
+  dir (system `/usr/include`, the active interpreter's `cmeel.prefix/include`,
+  or conda envs); if your Boost lives elsewhere, prepend it to
+  `CPLUS_INCLUDE_PATH`.
+
+The first run JIT-compiles the extension (`ighastar_generic_<N>_<C>_<H>`,
+~15–30 s); subsequent runs reuse the cached build.
+
+### Running
+
+```bash
+# IGHA* on Isaac Lab (headless), 2 obstacles
+python main.py simulator=isaaclab planner=ighastar
+
+# Genesis backend instead
+python main.py simulator=genesis planner=ighastar
+
+# Smaller/faster first run
+python main.py simulator=isaaclab planner=ighastar parallel_envs=16 planner.max_expansions=500
+```
+
+Worked example — hard 5-block / 3-z-level problem, saved for replay:
+
+```bash
+ISAACLAB_HEADLESS=1 python main.py \
+  simulator=isaaclab planner=ighastar viewer=headless \
+  n_obstacles=5 n_z_levels=3 \
+  parallel_envs=72 planner.max_expansions=100 \
+  push_steps=256 verify_push_steps=256 \
+  save=sol.json
+
+# then render the saved plan to a video
+python replay.py sol.json --video solution.mp4 --push-steps 256
+```
+
+(`num_controls = 4·(5+1)·3 = 72`, so `parallel_envs=72` runs ~3 node expansions
+per GPU sweep; `save=sol.json` writes the solution for `replay.py`.)
+
+### Config (`conf/planner/ighastar.yaml`)
+
+| Key | Default | Description |
+|---|---|---|
+| `max_expansions` | `5000` | Search budget; each expansion runs `num_controls` `batch_evaluate` sims |
+| `hysteresis` | `500` | IGHA* resolution-switch threshold |
+| `resolution` | `0.1` | Starting grid resolution per xy dim (m) |
+| `tolerance` | `0.0125` | Dedup tolerance per xy dim (m) |
+| `grid_z` | `true` | Also grid object z (height) in the hashed subspace (`HASH_DIMS = 3·(1+n_obstacles)`); set `false` to grid xy only (`2·(1+n_obstacles)`) |
+| `z_resolution` | `0.1` | Starting grid resolution for z dims (m), used when `grid_z=true` |
+| `z_tolerance` | `0.0125` | Dedup tolerance for z dims (m) |
+| `max_level` | `4` | Number of resolution levels |
+| `division_factor` | `2.0` | Resolution shrink factor per level |
+| `debug` | `false` | Print IGHA* per-iteration stats (Expansions/level/Q_v/Seen) + a profiler summary |
+| `preemptive_expansion.enabled` | `false` | Batch many `Q_v` vertices' successors into one `batch_evaluate` launch (helps fill `parallel_envs`; tends not to help at very large branching factors) |
+| `preemptive_expansion.min_preemptive` | `1` | Launch a preemptive batch only once the stash holds ≥ this many vertices |
+| `preemptive_expansion.max_preemptive` | `3` | Cap on vertices expanded per preemptive launch |
+
+If the search finds no goal, raise `planner.max_expansions` and/or
+`parallel_envs` (each expansion batches `num_controls` pushes through the
+simulator, so more parallel envs is faster).
 
 ## Parallel environments
 

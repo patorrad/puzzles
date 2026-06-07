@@ -9,6 +9,7 @@ python main.py
 # Switch simulator or planner via config group override:
 python main.py simulator=isaaclab
 python main.py planner=rrt
+python main.py planner=ighastar          # IGHA* search planner (see README)
 
 # Override individual values:
 python main.py n_obstacles=3 wall_thickness=0.1 seed=42
@@ -305,7 +306,15 @@ def main(cfg: DictConfig) -> None:
     # ---- run planner ----
     t0 = time.time()
 
-    if cfg.planner.name == 'mcts':
+    if cfg.planner.name == 'ighastar':
+        from planner_ighastar import IGHAStarPusher
+        logger.info('Running IGHA* (max_expansions=%d)...',
+                    cfg.planner.get('max_expansions', 5000))
+        planner = IGHAStarPusher.from_cfg(env, cfg, cfg.seed)
+        plan = planner.plan(initial_state, verbose=True,
+                            pause_before_verify=cfg.pause_before_verify)
+
+    elif cfg.planner.name == 'mcts':
         logger.info('Running MCTS (%d simulations)...', cfg.planner.n_simulations)
         planner = MCTSPusher(
             env=env,

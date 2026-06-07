@@ -1,0 +1,19 @@
+name: ighastar
+max_expansions: 5000     # search budget; each expansion = num_controls batch_evaluate sims
+hysteresis: 500          # IGHA* resolution-switch hysteresis threshold
+resolution: 0.1         # starting grid resolution per xy dim (metres, ~OBJ_SIZE*0.6)
+tolerance: 0.0125         # dedup tolerance per xy dim (metres)
+grid_z: true             # also grid object z (height) in the hashed subspace
+z_resolution: 0.1      # starting grid resolution for z dims (metres, ~OBJ_SIZE/2)
+z_tolerance: 0.0125      # dedup tolerance for z dims (metres)
+max_level: 4             # number of resolution levels
+division_factor: 2.0     # resolution shrink factor per level
+debug: true             # IGHA* per-iteration stats (Expansions/level/Q_v/Seen) + profiler summary
+
+# Batch the successor (dynamics) calls for many Q_v vertices into one
+# batch_evaluate launch instead of one node at a time. Pairs well with the
+# simulator's parallel envs; results are cached until each vertex is popped.
+preemptive_expansion:
+  enabled: false # this seemingly does not help for really large branching factors
+  min_preemptive: 1      # only launch a preemptive batch once the stash holds >= this many vertices
+  max_preemptive: 3     # cap on vertices expanded per launch
