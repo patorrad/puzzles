@@ -21,7 +21,7 @@ def build_env(cfg, n_envs: int, viewer_mode: str = 'replay'):
         from .isaaclab_env import BinEnvIsaacLab
         BinEnv = BinEnvIsaacLab
 
-    return BinEnv(
+    kwargs = dict(
         n_obstacles=cfg.n_obstacles,
         viewer_mode=viewer_mode,
         seed=cfg.seed,
@@ -46,6 +46,9 @@ def build_env(cfg, n_envs: int, viewer_mode: str = 'replay'):
         target_z_level=cfg.get('target_z_level', None),
         force_obstacle_on_target=cfg.get('force_obstacle_on_target', False),
     )
+    if sim == 'genesis':
+        kwargs['obstacle_shapes'] = cfg.get('obstacle_shapes', None)
+    return BinEnv(**kwargs)
 
 
 def __getattr__(name: str):

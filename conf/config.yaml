@@ -13,7 +13,8 @@ stackable: false
 difficult_spawn: false
 debug: false
 friction: 1.0
-obj_size: 0.05   # object cube side length (metres)
+obj_size: 0.05   # object cube side length (metres) — one cell of any shape
+obstacle_shapes: null  # null=all cubes; list of shape names e.g. [L, T, cube]; available: cube I O T S Z L J
 n_z_levels: 1
 target_z_level: null  # null = floor; integer forces the target to that z level (0=floor, 1=stacked, ...)
 force_obstacle_on_target: false  # if true, one obstacle is placed on top of the target (requires n_z_levels > target_z_level + 1)

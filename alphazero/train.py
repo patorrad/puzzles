@@ -26,7 +26,7 @@ from .grid import build_grid_spec, realize_state
 from .mcts import AZMCTS, run_parallel
 from .networks import SolverNet, StackerNet, masked_log_softmax
 from .replay_buffer import ReplayBuffer
-from .selfplay import SelfPlayConfig, play_batched_episodes, play_episode
+from .selfplay import SelfPlayConfig, play_batched_episodes, play_batched_episodes_random, play_episode
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +67,12 @@ def _train_step(net, buf, opt, batch_size):
     opt.step()
     return {'loss': float(loss), 'policy_loss': float(pl),
             'value_loss': float(vl), 'entropy': float(ent)}
+
+
+def _avg_metrics(lst: list[dict]) -> dict | None:
+    if not lst:
+        return None
+    return {k: sum(d[k] for d in lst) / len(lst) for k in lst[0]}
 
 
 def _record_demo_episode(env, solver_net, stacker_net, spec, sp_cfg, device,
@@ -169,17 +175,23 @@ def train(env, cfg):
     logger.info('Grid: %dx%dx%d cells (cell %.3fx%.3f m), %d z-levels',
                 spec.Gx, spec.Gy, spec.Z, spec.cell_w, spec.cell_d, spec.Z)
 
+    random_stacker = bool(cfg.get('random_stacker', False))
+
     solver_net, stacker_net = _build_networks(env, spec)
     solver_net.to(cfg.device)
-    stacker_net.to(cfg.device)
 
     solver_opt = torch.optim.Adam(solver_net.parameters(),
                                   lr=cfg.lr, weight_decay=cfg.weight_decay)
-    stacker_opt = torch.optim.Adam(stacker_net.parameters(),
-                                   lr=cfg.lr, weight_decay=cfg.weight_decay)
-
     solver_buf = ReplayBuffer(maxlen=cfg.buffer_size)
-    stacker_buf = ReplayBuffer(maxlen=cfg.buffer_size)
+
+    if not random_stacker:
+        stacker_net.to(cfg.device)
+        stacker_opt = torch.optim.Adam(stacker_net.parameters(),
+                                       lr=cfg.lr, weight_decay=cfg.weight_decay)
+        stacker_buf = ReplayBuffer(maxlen=cfg.buffer_size)
+    else:
+        stacker_net = stacker_opt = stacker_buf = None
+        logger.info('random_stacker=True: using env.reset() for initial states; StackerNet disabled')
 
     sp_cfg = SelfPlayConfig(**dict(cfg.selfplay))
 
@@ -196,7 +208,7 @@ def train(env, cfg):
                                'spec': asdict(spec),
                                'solver_in_dim': solver_net.in_dim,
                                'solver_actions': solver_net.n_actions,
-                               'stacker_actions': stacker_net.n_actions})
+                               'stacker_actions': stacker_net.n_actions if stacker_net else None})
         except Exception as e:
             logger.warning('wandb init failed (%s); disabling.', e)
             use_wandb = False
@@ -216,14 +228,20 @@ def train(env, cfg):
 
         while eps_played < cfg.episodes_per_iter:
             k = min(batch_K, cfg.episodes_per_iter - eps_played)
-            target_cells = [_sample_target_cell(spec, rng) for _ in range(k)]
-            results = play_batched_episodes(
-                env, solver_net, stacker_net, spec, target_cells, sp_cfg,
-                device=cfg.device)
+            if random_stacker:
+                results = play_batched_episodes_random(
+                    env, solver_net, spec, k, sp_cfg, device=cfg.device)
+            else:
+                target_cells = [_sample_target_cell(spec, rng) for _ in range(k)]
+                results = play_batched_episodes(
+                    env, solver_net, stacker_net, spec, target_cells, sp_cfg,
+                    device=cfg.device)
             for records, steps, won in results:
                 for rec, z in records:
-                    buf = solver_buf if rec.player == 'solver' else stacker_buf
-                    buf.push(rec.x, rec.pi, z, rec.legal_mask)
+                    if rec.player == 'solver':
+                        solver_buf.push(rec.x, rec.pi, z, rec.legal_mask)
+                    elif stacker_buf is not None:
+                        stacker_buf.push(rec.x, rec.pi, z, rec.legal_mask)
                 ep_wins += int(won)
                 ep_steps += steps
                 win_window.append(int(won))
@@ -232,22 +250,26 @@ def train(env, cfg):
             eps_played += k
 
         # Train
-        solver_metrics = stacker_metrics = None
+        solver_metrics_list: list[dict] = []
+        stacker_metrics_list: list[dict] = []
         for _ in range(cfg.train_steps_per_iter):
             m = _train_step(solver_net, solver_buf, solver_opt, cfg.batch_size)
             if m is not None:
-                solver_metrics = m
-            m = _train_step(stacker_net, stacker_buf, stacker_opt, cfg.batch_size)
-            if m is not None:
-                stacker_metrics = m
+                solver_metrics_list.append(m)
+            if not random_stacker:
+                m = _train_step(stacker_net, stacker_buf, stacker_opt, cfg.batch_size)
+                if m is not None:
+                    stacker_metrics_list.append(m)
+        solver_metrics = _avg_metrics(solver_metrics_list)
+        stacker_metrics = _avg_metrics(stacker_metrics_list)
 
         dt = time.time() - t0
         win_rate = sum(win_window) / max(len(win_window), 1)
         logger.info(
             '[iter %3d] %d eps in %.1fs | win_rate(win%d)=%.2f | '
-            'solver_buf=%d stacker_buf=%d | solver_loss=%s stacker_loss=%s',
+            'solver_buf=%d stacker_buf=%s | solver_loss=%s stacker_loss=%s',
             it, cfg.episodes_per_iter, dt, len(win_window), win_rate,
-            len(solver_buf), len(stacker_buf),
+            len(solver_buf), len(stacker_buf) if stacker_buf else 'n/a',
             f"{solver_metrics['loss']:.3f}" if solver_metrics else 'n/a',
             f"{stacker_metrics['loss']:.3f}" if stacker_metrics else 'n/a',
         )
@@ -255,7 +277,7 @@ def train(env, cfg):
             log = {'iter': it, 'win_rate_solver': win_rate,
                    'avg_solver_steps': ep_steps / max(cfg.episodes_per_iter, 1),
                    'solver_buffer': len(solver_buf),
-                   'stacker_buffer': len(stacker_buf)}
+                   'stacker_buffer': len(stacker_buf) if stacker_buf else 0}
             if solver_metrics:
                 log.update({f'solver/{k}': v for k, v in solver_metrics.items()})
             if stacker_metrics:
@@ -266,12 +288,12 @@ def train(env, cfg):
             ckpt = {
                 'iter': it,
                 'solver': solver_net.state_dict(),
-                'stacker': stacker_net.state_dict(),
+                'stacker': stacker_net.state_dict() if stacker_net else None,
                 'solver_in_dim': solver_net.in_dim,
                 'solver_n_actions': solver_net.n_actions,
-                'stacker_grid_h': stacker_net.grid_h,
-                'stacker_grid_w': stacker_net.grid_w,
-                'stacker_n_actions': stacker_net.n_actions,
+                'stacker_grid_h': stacker_net.grid_h if stacker_net else None,
+                'stacker_grid_w': stacker_net.grid_w if stacker_net else None,
+                'stacker_n_actions': stacker_net.n_actions if stacker_net else None,
                 'spec': asdict(spec),
             }
             path = os.path.join(cfg.output_dir, f'alphazero_iter_{it+1:04d}.pt')
@@ -279,7 +301,7 @@ def train(env, cfg):
             torch.save(ckpt, os.path.join(cfg.output_dir, 'alphazero_latest.pt'))
             logger.info('  Checkpoint saved to %s', path)
 
-            if use_wandb and bool(cfg.get('log_video', False)):
+            if use_wandb and bool(cfg.get('log_video', False)) and not random_stacker:
                 video_path = os.path.join(cfg.output_dir,
                                           f'demo_iter_{it+1:04d}.mp4')
                 solver_net.eval(); stacker_net.eval()

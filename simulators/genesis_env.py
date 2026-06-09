@@ -22,6 +22,7 @@ import time
 import torch
 import genesis as gs
 from .base_env import SimulatorEnv
+from .shapes import PIECES, shape_extents, write_shape_stl
 
 
 def _obstacle_color(i: int, n: int) -> tuple:
@@ -86,6 +87,7 @@ class BinEnv(SimulatorEnv):
                  bin_size: float | None = None,
                  bin_size_factor: float = 0.9,
                  obj_size: float = 0.05,
+                 obstacle_shapes: list[str] | None = None,
                  debug: bool = False):
         # Initialize Genesis once per process
         try:
@@ -94,6 +96,25 @@ class BinEnv(SimulatorEnv):
             # Already initialized
             pass
 
+        # Normalise obstacle_shapes to a list of length n_obstacles
+        if obstacle_shapes is None:
+            self.obstacle_shapes = ['cube'] * n_obstacles
+        else:
+            shapes = list(obstacle_shapes)
+            if len(shapes) < n_obstacles:
+                shapes += ['cube'] * (n_obstacles - len(shapes))
+            self.obstacle_shapes = shapes[:n_obstacles]
+
+        # Effective footprint size: max bounding-box extent across all shapes
+        max_cells = max(
+            max(shape_extents(PIECES[s])) for s in self.obstacle_shapes + ['cube']
+        )
+        effective_size = max_cells * obj_size
+
+        # Scale bin if using auto-size so larger shapes fit comfortably
+        if bin_size is None:
+            bin_size = (n_obstacles + 1) * effective_size * bin_size_factor
+
         super().__init__(n_obstacles=n_obstacles, n_envs=n_envs,
                          dt=dt, seed=seed, stackable=stackable, friction=friction,
                          n_z_levels=n_z_levels, push_steps=push_steps, substeps=substeps,
@@ -101,8 +122,18 @@ class BinEnv(SimulatorEnv):
                          reward_cfg=reward_cfg, bin_size=bin_size,
                          bin_size_factor=bin_size_factor, obj_size=obj_size, debug=debug)
 
+        self._effective_obj_size = effective_size
         self._OBJ_H    = self._OBJ_SIZE / 2
         self._pusher_w = self._OBJ_SIZE * 0.88
+
+        # Pre-generate STL mesh files for any non-cube shapes
+        self._mesh_dir = tempfile.mkdtemp(prefix='puzzle_shapes_')
+        self._mesh_files: dict[str, str] = {}
+        for shape_name in set(self.obstacle_shapes):
+            if shape_name != 'cube':
+                path = os.path.join(self._mesh_dir, f'{shape_name}.stl')
+                write_shape_stl(PIECES[shape_name], self._OBJ_SIZE, path)
+                self._mesh_files[shape_name] = path
 
         self._park = [-0.3, self.bin_d / 2, self._OBJ_H]
         self.z_levels = [self._OBJ_H + i * self._OBJ_SIZE for i in range(n_z_levels)]
@@ -215,11 +246,20 @@ class BinEnv(SimulatorEnv):
         # --- obstacle objects ---
         self.obstacles = []
         for oi in range(self.n_obstacles):
-            obs = self.scene.add_entity(
-                gs.morphs.Box(
+            shape_name = self.obstacle_shapes[oi]
+            if shape_name == 'cube':
+                morph = gs.morphs.Box(
                     size=(self._OBJ_SIZE, self._OBJ_SIZE, self._OBJ_SIZE),
                     pos=(bw / 2, bd / 2, self._OBJ_H),
-                ),
+                )
+            else:
+                morph = gs.morphs.Mesh(
+                    file=self._mesh_files[shape_name],
+                    pos=(bw / 2, bd / 2, self._OBJ_H),
+                    scale=1.0,
+                )
+            obs = self.scene.add_entity(
+                morph,
                 material=gs.materials.Rigid(rho=500, friction=self.friction),
                 surface=gs.surfaces.Default(color=_obstacle_color(oi, self.n_obstacles), opacity=0.6),
             )
@@ -240,7 +280,8 @@ class BinEnv(SimulatorEnv):
         if state is None:
             state = random_initial_state(
                 self.n_obstacles,
-                obj_size=self._OBJ_SIZE,
+                obj_size=self._effective_obj_size,
+                obj_height=self._OBJ_H,
                 stackable=self.stackable,
                 difficult_spawn=self.difficult_spawn,
                 bin_w=self.bin_w,

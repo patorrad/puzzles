@@ -26,9 +26,10 @@ def _place_objects_once(
     n_z_levels: int = 1,
     target_z_level: int | None = None,
     force_obstacle_on_target: bool = False,
+    obj_height: float | None = None,
 ) -> dict:
     """Single placement attempt. Caller is responsible for seeding."""
-    obj_h    = obj_size / 2
+    obj_h    = obj_height if obj_height is not None else obj_size / 2
     margin   = obj_size * 0.7
     x_lo, x_hi = margin, bin_w - margin
     y_lo, y_hi = margin, bin_d - margin
@@ -164,6 +165,7 @@ def random_initial_state(
     n_z_levels: int = 1,
     target_z_level: Optional[int] = None,
     force_obstacle_on_target: bool = False,
+    obj_height: Optional[float] = None,
 ) -> dict:
     """
     Generate a random non-overlapping initial state dict (pure PyTorch, no simulator).
@@ -212,7 +214,8 @@ def random_initial_state(
         state = _place_objects_once(n_obstacles, stackable, difficult_spawn, bin_w, bin_d,
                                     obj_size, n_z_levels,
                                     target_z_level=target_z_level,
-                                    force_obstacle_on_target=force_obstacle_on_target)
+                                    force_obstacle_on_target=force_obstacle_on_target,
+                                    obj_height=obj_height)
         if not difficult_spawn:
             return state
         pb = _path_blocker_value(state, n_obstacles)

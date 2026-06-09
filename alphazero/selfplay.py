@@ -31,6 +31,7 @@ class SelfPlayConfig:
     dirichlet_alpha: float = 0.3
     dirichlet_eps: float = 0.25
     settle_steps: int = 10
+    gamma: float = 0.95  # discount applied to value targets along the episode
 
 
 @dataclass
@@ -155,14 +156,92 @@ def play_batched_episodes(env, solver_net, stacker_net,
 
     outputs = []
     for i in range(K):
-        won = bool(env._is_goal(final_states[i]['env_state']))
-        z = 1.0 if won else -1.0
+        fs = final_states[i]['env_state']
+        won = bool(env._is_goal(fs))
+        if won:
+            z = 1.0
+        elif env._obstacles_dropped(fs):
+            z = -1.0
+        else:
+            z = -0.5  # depth-cap timeout — matches terminal_value()
+        T = len(solver_records[i])
         records: list[tuple[Record, float]] = []
-        for r in solver_records[i]:
-            records.append((r, z))
+        for t, r in enumerate(solver_records[i]):
+            records.append((r, z * cfg.gamma ** (T - 1 - t)))
         for r in stacker_records[i]:
             records.append((r, -z))
-        outputs.append((records, len(solver_records[i]), won))
+        outputs.append((records, T, won))
+    return outputs
+
+
+def play_batched_episodes_random(env, solver_net, spec: GridSpec, K: int,
+                                 cfg: SelfPlayConfig, device: str = 'cpu',
+                                 ) -> list[tuple[list, int, bool]]:
+    """Run K solver episodes with env-generated random initial states (no stacker).
+
+    Each env slot is independently reset so the solver trains on the same
+    distribution that main.py sees at planning time.  No stacker records are
+    produced.  Return format is identical to play_batched_episodes so the
+    caller can treat them interchangeably.
+    """
+    for i in range(K):
+        env.reset(env_idx=i)
+    _settle(env, cfg.settle_steps)
+    env_states = [env.get_state(i) for i in range(K)]
+
+    solver_game = SolverGame(env, spec, max_depth=cfg.max_depth)
+    solver_records: list[list[Record]] = [[] for _ in range(K)]
+    states = [solver_game.initial_state(es) for es in env_states]
+    finished = [solver_game.is_terminal(s) for s in states]
+    final_states = list(states)
+
+    for turn in range(cfg.max_depth):
+        active = [i for i in range(K) if not finished[i]]
+        if not active:
+            break
+
+        results = run_parallel(solver_game, solver_net,
+                               [states[i] for i in active],
+                               n_simulations=cfg.n_simulations_solver,
+                               c_puct=cfg.c_puct,
+                               dirichlet_alpha=cfg.dirichlet_alpha,
+                               dirichlet_eps=cfg.dirichlet_eps,
+                               add_root_noise=True,
+                               device=device)
+        T = _temperature(turn, cfg)
+        chosen: list[int] = []
+        for idx, i in enumerate(active):
+            _, counts = results[idx]
+            pi = visit_counts_to_policy(counts, T)
+            legal = solver_game.legal_mask(states[i])
+            if not torch.isfinite(pi).all() or pi.sum() <= 0:
+                pi = legal.float() / max(legal.sum().item(), 1)
+            x = solver_game.encode(states[i])
+            solver_records[i].append(Record(x=x, pi=pi, legal_mask=legal, player='solver'))
+            chosen.append(int(torch.multinomial(pi, 1).item()))
+
+        new_results = solver_game.batched_transition(
+            [states[i] for i in active], chosen)
+        for idx, i in enumerate(active):
+            next_state, terminal = new_results[idx]
+            states[i] = next_state
+            final_states[i] = next_state
+            if terminal:
+                finished[i] = True
+
+    outputs = []
+    for i in range(K):
+        fs = final_states[i]['env_state']
+        won = bool(env._is_goal(fs))
+        if won:
+            z = 1.0
+        elif env._obstacles_dropped(fs):
+            z = -1.0
+        else:
+            z = -0.5
+        T = len(solver_records[i])
+        records = [(r, z * cfg.gamma ** (T - 1 - t)) for t, r in enumerate(solver_records[i])]
+        outputs.append((records, T, won))
     return outputs
 
 
@@ -238,15 +317,25 @@ def play_episode(env, solver_net, stacker_net,
         state, _ = solver_game.transition(state, action)
         solver_steps += 1
 
-    solver_won = env._is_goal(state['env_state']) if 'env_state' in state else False
-    z_solver = 1.0 if solver_won else -1.0
+    env_state_final = state.get('env_state')
+    solver_won = bool(env._is_goal(env_state_final)) if env_state_final is not None else False
+    if solver_won:
+        z_solver = 1.0
+    elif env_state_final is not None and env._obstacles_dropped(env_state_final):
+        z_solver = -1.0
+    else:
+        z_solver = -0.5
 
-    # Attach outcomes
+    # Attach outcomes with discounting for solver records
+    solver_recs = [r for r in records if r.player == 'solver']
+    T = len(solver_recs)
+    solver_iter = iter(range(T))
     annotated: list[tuple[Record, float]] = []
     for r in records:
         if r.player == 'solver':
-            annotated.append((r, z_solver))
+            t = next(solver_iter)
+            annotated.append((r, z_solver * cfg.gamma ** (T - 1 - t)))
         else:
             annotated.append((r, -z_solver))
 
-    return [(r, z) for r, z in annotated], solver_steps, solver_won
+    return annotated, solver_steps, solver_won

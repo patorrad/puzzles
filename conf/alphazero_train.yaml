@@ -23,7 +23,7 @@ debug: false
 viewer: headless
 
 # Training
-n_iterations: 100
+n_iterations: 200
 episodes_per_iter: 32
 train_steps_per_iter: 100
 batch_size: 128
@@ -39,17 +39,20 @@ wandb_project: puzzle-alphazero
 wandb_entity: null
 wandb_run_name: null
 
+random_stacker: false   # if true, skip adversarial StackerNet and use env.reset() for random initial states
+
 selfplay:
-  n_simulations_solver: 200
+  n_simulations_solver: 100
   n_simulations_stacker: 100
   max_depth: 10
   temperature_init: 1.0
-  temperature_final: 1.0e-3
-  temperature_decay_after: 4
-  c_puct: 1.5
-  dirichlet_alpha: 0.3
-  dirichlet_eps: 0.25
+  temperature_final: 0.3 #1.0e-3
+  temperature_decay_after: 8 #4
+  c_puct: 2.5 #1.5
+  dirichlet_alpha: 0.15 #0.3
+  dirichlet_eps: 0.4 #0.25
   settle_steps: 10
+  gamma: 0.95
 
 hydra:
   run:
