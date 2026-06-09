@@ -1,0 +1,22 @@
+# Core
+numpy==1.23.5
+torch==2.7.0+cu128
+tqdm==4.67.3
+
+# Config
+hydra-core==1.3.2
+omegaconf==2.3.0
+PyYAML==6.0.2
+
+# Logging / visualization
+wandb==0.26.0
+matplotlib==3.10.3
+imageio[ffmpeg]==2.37.0
+
+# Testing
+pytest==9.0.3
+
+# Isaac Lab / Isaac Sim — install via NVIDIA:
+# https://isaac-sim.github.io/IsaacLab/main/source/setup/installation/
+# isaaclab==0.54.3
+# isaacsim==5.1.0.0
