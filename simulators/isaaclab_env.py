@@ -31,12 +31,15 @@ Quaternion convention: (w, x, y, z) — matches Genesis.
 import colorsys
 import logging
 import math
+import os
+import tempfile
 import time
 import numpy as np
 import torch
 from typing import List, Optional
 from tqdm import tqdm
 from .base_env import SimulatorEnv
+from .shapes import PIECES, shape_extents
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +137,7 @@ class BinEnvIsaacLab(SimulatorEnv):
                  bin_size: float | None = None,
                  bin_size_factor: float = 0.9,
                  obj_size: float = 0.05,
+                 obstacle_shapes: list[str] | None = None,
                  force_threshold: float = 100.0,
                  position_iterations: int = 4,
                  velocity_iterations: int = 1,
@@ -151,6 +155,16 @@ class BinEnvIsaacLab(SimulatorEnv):
                 "Install Isaac Lab before using BinEnvIsaacLab."
             )
 
+        _obs_shapes = (['cube'] * n_obstacles if obstacle_shapes is None
+                       else list(obstacle_shapes))
+        if len(_obs_shapes) < n_obstacles:
+            _obs_shapes += ['cube'] * (n_obstacles - len(_obs_shapes))
+        _obs_shapes = _obs_shapes[:n_obstacles]
+        _max_cells = max(max(shape_extents(PIECES[s])) for s in _obs_shapes + ['cube'])
+        _effective_size = _max_cells * obj_size
+        if bin_size is None:
+            bin_size = (n_obstacles + 1) * _effective_size * bin_size_factor
+
         super().__init__(
             n_obstacles=n_obstacles, n_envs=n_envs,
             dt=dt, seed=seed,
@@ -164,6 +178,9 @@ class BinEnvIsaacLab(SimulatorEnv):
             force_obstacle_on_target=force_obstacle_on_target,
             viewer_mode=viewer_mode,
         )
+
+        self.obstacle_shapes = _obs_shapes
+        self._effective_obj_size = _effective_size
 
         self._OBJ_H    = self._OBJ_SIZE / 2
         self._pusher_w = self._OBJ_SIZE * 0.88
@@ -210,6 +227,19 @@ class BinEnvIsaacLab(SimulatorEnv):
         self.rendering_enabled: bool = True
 
         self._init_sim()
+
+        # Pre-generate USD files for non-cube obstacle shapes.
+        self._mesh_dir = tempfile.mkdtemp(prefix='puzzle_shapes_')
+        self._obstacle_usd_paths: list[str | None] = []
+        for shape_name in self.obstacle_shapes:
+            if shape_name == 'cube':
+                self._obstacle_usd_paths.append(None)
+            else:
+                usd_path = os.path.join(self._mesh_dir, f'{shape_name}.usda')
+                if not os.path.exists(usd_path):
+                    self._write_obstacle_usd(PIECES[shape_name], usd_path)
+                self._obstacle_usd_paths.append(usd_path)
+
         self._build_scene()
         # Initialise the PhysX backend; must precede any tensor reads/writes
         self.sim.reset()
@@ -289,6 +319,55 @@ class BinEnvIsaacLab(SimulatorEnv):
         """Spawn a prim at the given world position and orientation (w,x,y,z)."""
         cfg.func(prim_path, cfg, translation=pos, orientation=quat)
 
+    def _write_obstacle_usd(self, cells: list, path: str) -> None:
+        """Write a USDA file for a multi-cell Tetris shape (compound rigid body)."""
+        from pxr import Gf, Usd, UsdGeom, UsdPhysics, PhysxSchema
+        stage = Usd.Stage.CreateNew(path)
+        root = UsdGeom.Xform.Define(stage, '/TetrisShape')
+        stage.SetDefaultPrim(root.GetPrim())
+
+        rows = [r for r, _ in cells]
+        cols = [c for _, c in cells]
+        cx = (max(rows) + min(rows)) / 2.0 * self._OBJ_SIZE
+        cy = (max(cols) + min(cols)) / 2.0 * self._OBJ_SIZE
+
+        for r, c in cells:
+            cube = UsdGeom.Cube.Define(stage, f'/TetrisShape/cell_{r}_{c}')
+            cube.GetSizeAttr().Set(self._OBJ_SIZE)
+            cube.AddTranslateOp().Set(
+                Gf.Vec3d(r * self._OBJ_SIZE - cx, c * self._OBJ_SIZE - cy, 0.0))
+            prim = cube.GetPrim()
+            UsdPhysics.CollisionAPI.Apply(prim)
+            PhysxSchema.PhysxCollisionAPI.Apply(prim)
+
+        stage.Save()
+
+    def _make_usd_cfg(self, usd_path: str, mass: float, color: tuple,
+                      pos_iters: int | None = None):
+        """Return a UsdFileCfg for spawning a multi-cell compound obstacle."""
+        vis = (sim_utils.PreviewSurfaceCfg(diffuse_color=color)
+               if color is not None else None)
+        return sim_utils.UsdFileCfg(
+            usd_path=usd_path,
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                kinematic_enabled=False,
+                disable_gravity=False,
+                solver_position_iteration_count=pos_iters,
+            ),
+            mass_props=sim_utils.MassPropertiesCfg(mass=mass),
+            collision_props=sim_utils.CollisionPropertiesCfg(
+                collision_enabled=True,
+                contact_offset=0.005,
+                rest_offset=0.0,
+            ),
+            physics_material=sim_utils.RigidBodyMaterialCfg(
+                static_friction=self.friction,
+                dynamic_friction=self.friction,
+                restitution=0.0,
+            ),
+            visual_material=vis,
+        )
+
     def _build_scene(self):
         """
         Spawn all geometry prims, then wrap dynamic objects in RigidObject views.
@@ -332,14 +411,18 @@ class BinEnvIsaacLab(SimulatorEnv):
             (self._OBJ_SIZE, self._OBJ_SIZE, self._OBJ_SIZE),
             mass=0.05, kinematic=False, friction=fr, color=(0.9, 0.2, 0.2),
             pos_iters=8)
-        obs_cfgs = [
-            self._make_box_cfg(
-                (self._OBJ_SIZE, self._OBJ_SIZE, self._OBJ_SIZE),
-                mass=0.5, kinematic=False, friction=fr,
-                color=_obstacle_color(oi, self.n_obstacles),
-                pos_iters=8)
-            for oi in range(self.n_obstacles)
-        ]
+        obs_cfgs = []
+        for oi in range(self.n_obstacles):
+            usd_path = self._obstacle_usd_paths[oi]
+            color = _obstacle_color(oi, self.n_obstacles)
+            if usd_path is None:
+                obs_cfgs.append(self._make_box_cfg(
+                    (self._OBJ_SIZE, self._OBJ_SIZE, self._OBJ_SIZE),
+                    mass=0.5, kinematic=False, friction=fr,
+                    color=color, pos_iters=8))
+            else:
+                obs_cfgs.append(self._make_usd_cfg(
+                    usd_path, mass=0.5, color=color, pos_iters=8))
 
         # Visual-only plane marking EXIT_Y — kinematic, collision disabled so
         # the target can pass through it freely.
@@ -606,7 +689,7 @@ class BinEnvIsaacLab(SimulatorEnv):
 
         state = random_initial_state(
             self.n_obstacles,
-            obj_size=self._OBJ_SIZE,
+            obj_size=self._effective_obj_size,
             stackable=self.stackable,
             difficult_spawn=self.difficult_spawn,
             bin_w=self.bin_w,
@@ -615,6 +698,7 @@ class BinEnvIsaacLab(SimulatorEnv):
             n_z_levels=self.n_z_levels,
             target_z_level=self.target_z_level,
             force_obstacle_on_target=self.force_obstacle_on_target,
+            obj_height=self._OBJ_H,
         )
 
         env_ids = torch.tensor([0], device=self.device, dtype=torch.long)

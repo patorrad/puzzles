@@ -46,7 +46,7 @@ def build_env(cfg, n_envs: int, viewer_mode: str = 'replay'):
         target_z_level=cfg.get('target_z_level', None),
         force_obstacle_on_target=cfg.get('force_obstacle_on_target', False),
     )
-    if sim == 'genesis':
+    if sim in ('genesis', 'isaaclab'):
         kwargs['obstacle_shapes'] = cfg.get('obstacle_shapes', None)
     return BinEnv(**kwargs)
 

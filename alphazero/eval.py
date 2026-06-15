@@ -25,7 +25,7 @@ from .encoders import solver_state_dim, solver_action_dim
 from .games import SolverGame, StackerGame, action_idx_to_solver_dict
 from .grid import GridSpec, realize_state
 from .mcts import AZMCTS, run_parallel, visit_counts_to_policy
-from .networks import SolverNet, StackerNet
+from .networks import build_solver_net, build_stacker_net
 from .selfplay import SelfPlayConfig, Record
 
 logger = logging.getLogger(__name__)
@@ -272,16 +272,22 @@ def evaluate(env, solver_net, stacker_net, spec: GridSpec, sp_cfg: SelfPlayConfi
     )
 
 
-def load_checkpoint(path: str) -> tuple[SolverNet, StackerNet, GridSpec]:
+def load_checkpoint(path: str) -> tuple[nn.Module, nn.Module, GridSpec]:
     ckpt = torch.load(path, map_location='cpu', weights_only=False)
-    solver = SolverNet(in_dim=ckpt['solver_in_dim'],
-                       n_actions=ckpt['solver_n_actions'])
+    spec = GridSpec(**ckpt['spec'])
+    # Checkpoints from before the net_arch knob are always MLPs.
+    arch = ckpt.get('net_arch', 'mlp')
+    solver = build_solver_net(arch,
+                              in_dim=ckpt['solver_in_dim'],
+                              n_actions=ckpt['solver_n_actions'],
+                              n_obstacles=ckpt.get('n_obstacles', 0),
+                              grid_h=spec.Gx, grid_w=spec.Gy)
     solver.load_state_dict(ckpt['solver'])
     solver.eval()
-    stacker = StackerNet(grid_h=ckpt['stacker_grid_h'],
-                         grid_w=ckpt['stacker_grid_w'],
-                         n_actions=ckpt['stacker_n_actions'])
+    stacker = build_stacker_net(arch,
+                                grid_h=ckpt['stacker_grid_h'],
+                                grid_w=ckpt['stacker_grid_w'],
+                                n_actions=ckpt['stacker_n_actions'])
     stacker.load_state_dict(ckpt['stacker'])
     stacker.eval()
-    spec = GridSpec(**ckpt['spec'])
     return solver, stacker, spec

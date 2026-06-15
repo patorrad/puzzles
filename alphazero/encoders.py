@@ -11,29 +11,54 @@ import torch
 from .grid import GridSpec
 
 
+# Per-object continuous features: xyz (3) + canonicalized quaternion (4).
+OBJ_POSE_DIM = 7
+
+
 def solver_state_dim(spec: GridSpec, n_obstacles: int) -> int:
     """Length of the flat vector returned by encode_solver_state."""
-    return 3 + 3 * n_obstacles + spec.Gx * spec.Gy * (1 + n_obstacles)
+    n_objects = 1 + n_obstacles
+    return OBJ_POSE_DIM * n_objects + spec.Gx * spec.Gy * n_objects
+
+
+def _canonical_quat(q: torch.Tensor) -> torch.Tensor:
+    """Fix the q ≡ -q sign ambiguity (convention-agnostic: works for wxyz/xyzw).
+
+    Flips the quaternion so its largest-magnitude component is positive, making
+    physically identical orientations encode identically.
+    """
+    q = q.reshape(-1, 4)
+    lead = q.gather(1, q.abs().argmax(dim=1, keepdim=True))
+    return torch.where(lead < 0, -q, q)
+
+
+def _pad_rows(x: torch.Tensor, n_rows: int) -> torch.Tensor:
+    if x.shape[0] >= n_rows:
+        return x[:n_rows]
+    return torch.cat([x, torch.zeros(n_rows - x.shape[0], x.shape[1])])
 
 
 def encode_solver_state(state: dict, spec: GridSpec, n_obstacles: int) -> torch.Tensor:
-    """Flat encoding: continuous poses + per-cell one-hots of each object.
+    """Flat encoding: continuous poses + orientations + per-cell one-hots.
 
-    [ target_xyz (3),
-      obstacle_xyz (3*N),
+    Section-contiguous layout (lets SolverTransformer reshape each section to
+    per-object rows without copying):
+    [ target_xyz (3), obstacle_xyz (3*N),
+      target_quat (4), obstacle_quat (4*N),
       target_cell_one_hot (Gx*Gy),
       per-obstacle_cell_one_hot (Gx*Gy * N) ]
     """
     target_pos = state['target_pos'].detach().float().cpu()[:3]
     obstacle_pos = state['obstacle_pos'].detach().float().cpu().reshape(-1, 3)
+    target_quat = _canonical_quat(state['target_quat'].detach().float().cpu())
+    obstacle_quat = _canonical_quat(state['obstacle_quat'].detach().float().cpu())
 
     parts = [target_pos.flatten()]
     if n_obstacles > 0:
-        flat_obs = obstacle_pos.flatten()
-        if flat_obs.numel() < 3 * n_obstacles:
-            pad = torch.zeros(3 * n_obstacles - flat_obs.numel())
-            flat_obs = torch.cat([flat_obs, pad])
-        parts.append(flat_obs[:3 * n_obstacles])
+        parts.append(_pad_rows(obstacle_pos, n_obstacles).flatten())
+    parts.append(target_quat.flatten()[:4])
+    if n_obstacles > 0:
+        parts.append(_pad_rows(obstacle_quat, n_obstacles).flatten())
 
     n_cells = spec.Gx * spec.Gy
     target_oh = torch.zeros(n_cells)

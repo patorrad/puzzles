@@ -11,19 +11,25 @@ import copy
 import logging
 
 import torch
+import torch.nn as nn
 
 from .games import SolverGame
 from .grid import build_grid_spec, GridSpec
 from .mcts import AZMCTS
-from .networks import SolverNet
+from .networks import build_solver_net
 
 logger = logging.getLogger(__name__)
 
 
-def _load_solver_net(path: str) -> tuple[SolverNet, dict]:
+def _load_solver_net(path: str) -> tuple[nn.Module, dict]:
     ckpt = torch.load(path, map_location='cpu', weights_only=False)
-    net = SolverNet(in_dim=ckpt['solver_in_dim'],
-                    n_actions=ckpt['solver_n_actions'])
+    spec = GridSpec(**ckpt['spec'])
+    # Checkpoints from before the net_arch knob are always MLPs.
+    net = build_solver_net(ckpt.get('net_arch', 'mlp'),
+                           in_dim=ckpt['solver_in_dim'],
+                           n_actions=ckpt['solver_n_actions'],
+                           n_obstacles=ckpt.get('n_obstacles', 0),
+                           grid_h=spec.Gx, grid_w=spec.Gy)
     net.load_state_dict(ckpt['solver'])
     net.eval()
     return net, ckpt

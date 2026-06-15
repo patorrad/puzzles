@@ -1,5 +1,5 @@
 name: mcts
-n_simulations: 200000
+n_simulations: 10000
 rollout_depth: 5
 max_depth: 10
 c_ucb: 1.4  # UCB1 exploration constant: higher = explore more, lower = exploit more (sqrt(2) ≈ 1.414 is the theoretical default)

@@ -24,21 +24,24 @@ from .encoders import solver_state_dim, solver_action_dim
 from .games import SolverGame, StackerGame, action_idx_to_solver_dict
 from .grid import build_grid_spec, realize_state
 from .mcts import AZMCTS, run_parallel
-from .networks import SolverNet, StackerNet, masked_log_softmax
+from .networks import build_solver_net, build_stacker_net, masked_log_softmax
 from .replay_buffer import ReplayBuffer
 from .selfplay import SelfPlayConfig, play_batched_episodes, play_batched_episodes_random, play_episode
 
 logger = logging.getLogger(__name__)
 
 
-def _build_networks(env, spec):
+def _build_networks(env, spec, arch: str = 'mlp'):
     n_obs = env.n_obstacles
     Z = max(1, env.n_z_levels)
-    solver = SolverNet(
+    solver = build_solver_net(
+        arch,
         in_dim=solver_state_dim(spec, n_obs),
         n_actions=solver_action_dim(n_obs, Z),
+        n_obstacles=n_obs, grid_h=spec.Gx, grid_w=spec.Gy,
     )
-    stacker = StackerNet(
+    stacker = build_stacker_net(
+        arch,
         grid_h=spec.Gx, grid_w=spec.Gy,
         n_actions=spec.n_actions,
         in_channels=4,
@@ -165,7 +168,7 @@ def train(env, cfg):
     cfg fields (Hydra DictConfig compatible):
       n_iterations, episodes_per_iter, train_steps_per_iter, batch_size,
       buffer_size, lr, weight_decay, checkpoint_every, output_dir,
-      seed, device, use_wandb,
+      seed, device, use_wandb, resume_from (optional path to a .pt checkpoint),
       and a nested 'selfplay' subconfig of SelfPlayConfig fields.
     """
     rng = random.Random(cfg.seed)
@@ -177,7 +180,14 @@ def train(env, cfg):
 
     random_stacker = bool(cfg.get('random_stacker', False))
 
-    solver_net, stacker_net = _build_networks(env, spec)
+    net_arch = cfg.get('net_arch', 'mlp')
+    solver_net, stacker_net = _build_networks(env, spec, net_arch)
+    logger.info('net_arch=%s: solver %s (%d params), stacker %s (%d params)',
+                net_arch,
+                type(solver_net).__name__,
+                sum(p.numel() for p in solver_net.parameters()),
+                type(stacker_net).__name__,
+                sum(p.numel() for p in stacker_net.parameters()))
     solver_net.to(cfg.device)
 
     solver_opt = torch.optim.Adam(solver_net.parameters(),
@@ -193,6 +203,19 @@ def train(env, cfg):
         stacker_net = stacker_opt = stacker_buf = None
         logger.info('random_stacker=True: using env.reset() for initial states; StackerNet disabled')
 
+    start_iter = 0
+    resumed_wandb_id = None
+    resume_from = cfg.get('resume_from', None)
+    if resume_from:
+        ckpt = torch.load(resume_from, map_location=cfg.device)
+        solver_net.load_state_dict(ckpt['solver'])
+        if stacker_net is not None and ckpt.get('stacker') is not None:
+            stacker_net.load_state_dict(ckpt['stacker'])
+        start_iter = ckpt['iter'] + 1
+        resumed_wandb_id = ckpt.get('wandb_id')
+        logger.info('Resumed from %s (iter %d → continuing from iter %d)',
+                    resume_from, ckpt['iter'], start_iter)
+
     sp_cfg = SelfPlayConfig(**dict(cfg.selfplay))
 
     use_wandb = bool(cfg.use_wandb)
@@ -204,6 +227,8 @@ def train(env, cfg):
             wandb.init(project=cfg.get('wandb_project', 'puzzle-alphazero'),
                        entity=cfg.get('wandb_entity') or None,
                        name=cfg.get('wandb_run_name') or None,
+                       id=resumed_wandb_id or None,
+                       resume='allow' if resumed_wandb_id else None,
                        config={'cfg': dict(cfg),
                                'spec': asdict(spec),
                                'solver_in_dim': solver_net.in_dim,
@@ -221,7 +246,7 @@ def train(env, cfg):
     # Cap K at env.n_envs so env.batch_evaluate never has to split internally.
     batch_K = max(1, min(cfg.episodes_per_iter, env.n_envs))
 
-    for it in range(cfg.n_iterations):
+    for it in range(start_iter, cfg.n_iterations):
         t0 = time.time()
         ep_wins, ep_steps = 0, 0
         eps_played = 0
@@ -287,6 +312,8 @@ def train(env, cfg):
         if (it + 1) % cfg.checkpoint_every == 0 or it == cfg.n_iterations - 1:
             ckpt = {
                 'iter': it,
+                'net_arch': net_arch,
+                'n_obstacles': env.n_obstacles,
                 'solver': solver_net.state_dict(),
                 'stacker': stacker_net.state_dict() if stacker_net else None,
                 'solver_in_dim': solver_net.in_dim,
@@ -295,6 +322,7 @@ def train(env, cfg):
                 'stacker_grid_w': stacker_net.grid_w if stacker_net else None,
                 'stacker_n_actions': stacker_net.n_actions if stacker_net else None,
                 'spec': asdict(spec),
+                'wandb_id': wandb.run.id if wandb and wandb.run else None,
             }
             path = os.path.join(cfg.output_dir, f'alphazero_iter_{it+1:04d}.pt')
             torch.save(ckpt, path)

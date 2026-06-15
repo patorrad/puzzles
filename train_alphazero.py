@@ -4,6 +4,7 @@ Usage:
   python train_alphazero.py
   python train_alphazero.py simulator=genesis n_iterations=50 device=cuda
   python train_alphazero.py selfplay.n_simulations_solver=50 episodes_per_iter=16
+  python train_alphazero.py resume_from=outputs/alphazero/alphazero_latest.pt n_iterations=200
 
 NOTE: Isaac Lab reads ISAACLAB_HEADLESS / ISAACLAB_ENABLE_CAMERAS at module-load
 time (simulators/isaaclab_env.py launches the app at import). So this script

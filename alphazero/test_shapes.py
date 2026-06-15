@@ -10,7 +10,8 @@ from .encoders import (encode_solver_state, encode_stacker_state,
 from .games import SolverGame, StackerGame
 from .grid import GridSpec, legal_mask, realize_state
 from .mcts import AZMCTS, run_parallel, visit_counts_to_policy
-from .networks import SolverNet, StackerNet, masked_softmax
+from .networks import (SolverNet, StackerNet, build_solver_net,
+                       build_stacker_net, masked_softmax)
 from .replay_buffer import ReplayBuffer
 
 
@@ -67,6 +68,40 @@ def test_stacker_net_shapes():
     assert torch.allclose(pi.sum(dim=-1), torch.ones(B), atol=1e-5)
     assert (pi[:, 2:] == 0).all()
     print('[ok] StackerNet + masked_softmax')
+
+
+def test_solver_arch_shapes():
+    spec = _toy_spec()
+    n_obs = 2
+    in_dim = solver_state_dim(spec, n_obs)
+    A = solver_action_dim(n_obs, 1)
+    B = 4
+    for arch in ('mlp', 'resnet', 'transformer'):
+        net = build_solver_net(arch, in_dim=in_dim, n_actions=A,
+                               n_obstacles=n_obs, grid_h=spec.Gx, grid_w=spec.Gy)
+        logits, v = net(torch.randn(B, in_dim))
+        assert logits.shape == (B, A), (arch, logits.shape)
+        assert v.shape == (B,), (arch, v.shape)
+        assert (v >= -1).all() and (v <= 1).all()
+        # Unbatched forward (MCTS always batches, but keep parity with SolverNet)
+        logits1, v1 = net(torch.randn(in_dim))
+        assert logits1.shape == (A,), (arch, logits1.shape)
+        assert v1.dim() == 0, (arch, v1.shape)
+        n_params = sum(p.numel() for p in net.parameters())
+        print(f'[ok] solver arch={arch}: {type(net).__name__} ({n_params} params)')
+
+
+def test_stacker_arch_shapes():
+    spec = _toy_spec()
+    B = 4
+    for arch in ('mlp', 'resnet', 'transformer'):
+        net = build_stacker_net(arch, grid_h=spec.Gx, grid_w=spec.Gy,
+                                n_actions=spec.n_actions)
+        logits, v = net(torch.randn(B, 4, spec.Gx, spec.Gy))
+        assert logits.shape == (B, spec.n_actions), (arch, logits.shape)
+        assert v.shape == (B,), (arch, v.shape)
+        n_params = sum(p.numel() for p in net.parameters())
+        print(f'[ok] stacker arch={arch}: {type(net).__name__} ({n_params} params)')
 
 
 def test_encode_dims():
@@ -284,6 +319,8 @@ if __name__ == '__main__':
     test_legal_mask()
     test_solver_net_shapes()
     test_stacker_net_shapes()
+    test_solver_arch_shapes()
+    test_stacker_arch_shapes()
     test_encode_dims()
     test_replay_buffer()
     test_realize_state()
