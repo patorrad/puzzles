@@ -321,10 +321,24 @@ class BinEnvIsaacLab(SimulatorEnv):
 
     def _write_obstacle_usd(self, cells: list, path: str) -> None:
         """Write a USDA file for a multi-cell Tetris shape (compound rigid body)."""
-        from pxr import Gf, Usd, UsdGeom, UsdPhysics, PhysxSchema
+        from pxr import Gf, Usd, UsdGeom, UsdPhysics, UsdShade, PhysxSchema
         stage = Usd.Stage.CreateNew(path)
         root = UsdGeom.Xform.Define(stage, '/TetrisShape')
         stage.SetDefaultPrim(root.GetPrim())
+
+        # Apply RigidBodyAPI + MassAPI to root so UsdFileCfg can find and modify them.
+        root_prim = root.GetPrim()
+        rigid_api = UsdPhysics.RigidBodyAPI.Apply(root_prim)
+        rigid_api.CreateRigidBodyEnabledAttr(True)
+        mass_api = UsdPhysics.MassAPI.Apply(root_prim)
+        mass_api.CreateMassAttr(0.5)
+
+        # Bake friction into the USD so UsdFileCfg (which lacks physics_material) picks it up.
+        mat = UsdShade.Material.Define(stage, '/TetrisShape/PhysicsMaterial')
+        phys_mat = UsdPhysics.MaterialAPI.Apply(mat.GetPrim())
+        phys_mat.CreateStaticFrictionAttr(self.friction)
+        phys_mat.CreateDynamicFrictionAttr(self.friction)
+        phys_mat.CreateRestitutionAttr(0.0)
 
         rows = [r for r, _ in cells]
         cols = [c for _, c in cells]
@@ -339,6 +353,8 @@ class BinEnvIsaacLab(SimulatorEnv):
             prim = cube.GetPrim()
             UsdPhysics.CollisionAPI.Apply(prim)
             PhysxSchema.PhysxCollisionAPI.Apply(prim)
+            UsdShade.MaterialBindingAPI.Apply(prim).Bind(
+                mat, UsdShade.Tokens.strongerThanDescendants, 'physics')
 
         stage.Save()
 
@@ -359,11 +375,6 @@ class BinEnvIsaacLab(SimulatorEnv):
                 collision_enabled=True,
                 contact_offset=0.005,
                 rest_offset=0.0,
-            ),
-            physics_material=sim_utils.RigidBodyMaterialCfg(
-                static_friction=self.friction,
-                dynamic_friction=self.friction,
-                restitution=0.0,
             ),
             visual_material=vis,
         )

@@ -110,12 +110,14 @@ def action_idx_to_solver_dict(action_idx: int, state: dict, env,
 class SolverGame:
     """Solver-side adapter. Wraps env for transitions and goal/dropout checks."""
 
-    def __init__(self, env, spec: GridSpec, max_depth: int = 10):
+    def __init__(self, env, spec: GridSpec, max_depth: int = 10,
+                 reward_scale: float = 0.0):
         self.env = env
         self.spec = spec
         self.n_obstacles = env.n_obstacles
         self.n_z_levels = max(1, env.n_z_levels)
         self.max_depth = max_depth
+        self.reward_scale = reward_scale
         self.n_actions = solver_action_dim(self.n_obstacles, self.n_z_levels)
 
     def encode(self, state: dict) -> torch.Tensor:
@@ -132,11 +134,14 @@ class SolverGame:
         return self.env._obstacles_dropped(state['env_state'])
 
     def terminal_value(self, state: dict) -> float:
-        if self.env._is_goal(state['env_state']):
+        es = state['env_state']
+        if self.reward_scale > 0.0:
+            r = float(self.env._compute_reward(es)) / self.reward_scale
+            return max(-1.0, min(1.0, r))
+        if self.env._is_goal(es):
             return 1.0
-        if self.env._obstacles_dropped(state['env_state']):
+        if self.env._obstacles_dropped(es):
             return -1.0
-        # depth-cap timeout: small negative — solver failed to escape
         return -0.5
 
     def transition(self, state: dict, action_idx: int) -> tuple[dict, bool]:

@@ -1,6 +1,6 @@
 name: alphazero
 checkpoint: alphazero_latest.pt   # path to trained .pt (relative to working dir)
-n_simulations: 10000                 # PUCT sims per move at inference
+n_simulations: 20000                 # PUCT sims per move at inference
 max_depth: 10
 c_puct: 1.5
 temperature: 1e-3                 # near-zero at inference (argmax-N)

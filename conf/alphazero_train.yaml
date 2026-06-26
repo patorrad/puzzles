@@ -11,6 +11,7 @@ stackable: false
 difficult_spawn: false
 friction: 1.0
 obj_size: 0.05
+obstacle_shapes: null  # null=all cubes; list e.g. [L,T,S,Z,I,O,J,cube]; available: cube I O T S Z L J
 n_z_levels: 1
 target_z_level: null
 force_obstacle_on_target: false
@@ -55,6 +56,7 @@ selfplay:
   dirichlet_eps: 0.25 #0.4 #0.25
   settle_steps: 10
   gamma: 0.95
+  reward_scale: 2.0  # divides env._compute_reward for value targets; 0 = sparse ±1 fallback
 
 hydra:
   run:

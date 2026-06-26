@@ -173,6 +173,10 @@ class _DummyEnv:
             'obstacle_quat': torch.tensor([[0., 0., 0., 1.]] * 2),
         }
 
+    def _compute_reward(self, state) -> float:
+        y = float(state['target_pos'][1])
+        return max(0.0, (0.135 / 2 - y) / (0.135 / 2 - self._EXIT_Y))
+
     def set_state(self, state, env_idx=None):
         pass
 
@@ -244,7 +248,7 @@ def test_batched_episodes_smoke():
                                 target_cells, cfg)
     assert len(out) == 3
     for records, steps, won in out:
-        assert all(z in (-1.0, 1.0) for _, z in records)
+        assert all(-1.0 <= z <= 1.0 for _, z in records)
         assert any(r.player == 'stacker' for r, _ in records)
     print(f'[ok] batched episodes: K=3 → won={[w for _, _, w in out]} '
           f'steps={[s for _, s, _ in out]}')
@@ -263,7 +267,7 @@ def test_episode_smoke():
     pairs, steps, won = play_episode(env, solver_net, stacker_net,
                                      spec, target_cell=(2, 2), cfg=cfg)
     assert any(r.player == 'stacker' for r, _ in pairs)
-    assert all(z in (-1.0, 1.0) for _, z in pairs)
+    assert all(-1.0 <= z <= 1.0 for _, z in pairs)
     print(f'[ok] episode smoke: {len(pairs)} records, solver steps={steps}, won={won}')
 
 
