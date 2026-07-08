@@ -122,6 +122,11 @@ def _puzzle_worker(cfg: DictConfig, scenarios: list, out_dir: Path, q) -> None:
 
         puzzle_results.append(result)
 
+        pr_path = out_dir / 'puzzle_results' / f'{scenario_name}.json'
+        pr_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(pr_path, 'w') as _f:
+            json.dump(asdict(result), _f, indent=2)
+
     # Convert torch tensors in plans to plain lists before crossing the process
     # boundary — torch's shared-memory fd mechanism doesn't work across spawn.
     def _detach_plan(plan):
@@ -605,7 +610,7 @@ def main(cfg: DictConfig) -> None:
 
         run_id = wandb.run.id
         out_dir = Path(cfg.output_dir) / run_id
-        for subdir in ('scenarios', 'solutions', 'isaaclabmpc_results', 'telemetry', 'logs'):
+        for subdir in ('scenarios', 'solutions', 'puzzle_results', 'isaaclabmpc_results', 'telemetry', 'logs'):
             (out_dir / subdir).mkdir(parents=True, exist_ok=True)
         print(f'\nOutput directory: {out_dir}')
 
@@ -736,6 +741,7 @@ def main(cfg: DictConfig) -> None:
         out_dir = Path(cfg.output_dir) / run_id
         (out_dir / 'scenarios').mkdir(parents=True, exist_ok=True)
         (out_dir / 'solutions').mkdir(parents=True, exist_ok=True)
+        (out_dir / 'puzzle_results').mkdir(parents=True, exist_ok=True)
         (out_dir / 'isaaclabmpc_results').mkdir(parents=True, exist_ok=True)
         (out_dir / 'telemetry').mkdir(parents=True, exist_ok=True)
         (out_dir / 'logs').mkdir(parents=True, exist_ok=True)
