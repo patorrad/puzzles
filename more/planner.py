@@ -1,0 +1,195 @@
+"""
+MOREPlanner — inference wrapper for MORE (Huang et al., ICRA 2022, arXiv:2202.01426).
+
+Implements the shared Planner protocol so it can be swapped directly with
+AlphaZeroPusher in any eval harness.
+
+NOTE: Action count is a soft metric when comparing MORE against PUCT.  MORE's
+contour pushes and PUCT's cardinal moves are different units of work; a single
+MORE push may correspond to a qualitatively different intervention than a cardinal
+push.  Primary comparison metrics are success rate, planning wall-clock time, and
+downstream real-arm execution performance.
+"""
+
+from __future__ import annotations
+
+import copy
+import time
+
+import torch
+
+from planner import _verify_plan
+from more.contour_sampler import ContourSampler
+from more.mcts import MORETree
+from more.ppn import PPN
+
+
+def _load_ppn(path: str, n_obstacles: int) -> PPN:
+    ckpt = torch.load(path, map_location='cpu', weights_only=False)
+    net = PPN(
+        n_obstacles=n_obstacles,
+        obj_emb_dim=ckpt.get('obj_emb_dim', 64),
+        push_emb_dim=ckpt.get('push_emb_dim', 64),
+        agg_hidden=ckpt.get('agg_hidden', 128),
+    )
+    net.load_state_dict(ckpt['ppn'])
+    net.eval()
+    return net
+
+
+class MOREPlanner:
+    """
+    MORE guided-MCTS planner.
+
+    References
+    ----------
+    Huang et al., "Interleaving Monte Carlo Tree Search and Self-Supervised
+    Learning for Object Retrieval in Clutter", ICRA 2022, arXiv:2202.01426.
+
+    Parameters
+    ----------
+    env : SimulatorEnv
+    ppn_path : str | None
+        Path to a trained PPN checkpoint.  If None, falls back to unguided UCT
+        (useful for Phase A data collection without a trained network).
+    n_simulations : int
+        MCTS iterations per plan() call.
+    max_depth : int
+        Maximum search depth (paper uses 3 for guided eval).
+    gamma : float
+        Discount factor (paper uses 0.5).
+    k_per_object : int
+        Contour push samples per object per expansion step.
+    verify_threshold : float
+    min_verify_envs : int
+    seed : int | None
+    """
+
+    def __init__(self,
+                 env,
+                 ppn_path: str | None = None,
+                 n_simulations: int = 500,
+                 max_depth: int = 3,
+                 gamma: float = 0.5,
+                 k_per_object: int = 8,
+                 rollout_depth: int = 5,
+                 m: int = 3,
+                 c_uct: float = 2.0,
+                 verify_threshold: float = 0.75,
+                 min_verify_envs: int = 16,
+                 verify_push_steps: int | None = None,
+                 seed: int | None = 42):
+        self.env = env
+        self.n_simulations = n_simulations
+        self.max_depth = max_depth
+        self.verify_threshold = verify_threshold
+        self.min_verify_envs = min_verify_envs
+        self.verify_push_steps = verify_push_steps
+        self.batch_size = max(1, env.n_envs)
+
+        if seed is not None:
+            torch.manual_seed(seed)
+
+        self.ppn: PPN | None = None
+        if ppn_path is not None:
+            self.ppn = _load_ppn(ppn_path, env.n_obstacles)
+
+        self.sampler = ContourSampler.from_env(env, include_target=True)
+        self.tree = MORETree(
+            env=env,
+            ppn=self.ppn,
+            contour_sampler=self.sampler,
+            gamma=gamma,
+            max_depth=max_depth,
+            rollout_depth=rollout_depth,
+            m=m,
+            c_uct=c_uct,
+            k_per_object=k_per_object,
+        )
+
+    # ------------------------------------------------------------------
+    # Planner protocol
+    # ------------------------------------------------------------------
+
+    def plan(self,
+             initial_state: dict | None = None,
+             verbose: bool = True,
+             pause_before_verify: bool = False) -> list[dict] | None:
+        if initial_state is None:
+            initial_state = self.env.get_state(0)
+
+        t0 = time.perf_counter()
+        plan: list[dict] = []
+        state = copy.deepcopy(initial_state)
+
+        for step in range(self.max_depth):
+            if self.env._is_goal(state):
+                break
+
+            action = self.tree.search(state, self.n_simulations)
+            if action is None:
+                if verbose:
+                    print(f'  MORE: no action found at step {step}, stopping.')
+                break
+
+            results = self.env.batch_evaluate([(state, action)])
+            new_state, reward, done = results[0]
+
+            if self.env._obstacles_dropped(new_state):
+                if verbose:
+                    print(f'  MORE: obstacle dropped at step {step}, stopping.')
+                break
+
+            plan.append(action)
+            if verbose:
+                atype = action['action_type']
+                oidx  = action.get('obj_idx', '?')
+                print(f'  MORE step {step+1}: [{atype}] obj={oidx} r={reward:.3f}')
+            state = new_state
+
+            if done:
+                break
+
+        elapsed = time.perf_counter() - t0
+
+        if not plan:
+            return None
+
+        # Verify
+        ctx = (self.env.push_steps_ctx(self.verify_push_steps)
+               if hasattr(self.env, 'push_steps_ctx') else _NullCtx())
+        with ctx:
+            n_tries = max(self.min_verify_envs, self.batch_size)
+            successes, avg_reward = _verify_plan(
+                self.env, plan, copy.deepcopy(initial_state),
+                n_tries, verbose=verbose, pause=pause_before_verify)
+
+        rate = successes / n_tries
+        if rate < self.verify_threshold:
+            if verbose:
+                print(f'  MORE: plan failed verification ({successes}/{n_tries}, '
+                      f'avg_reward={avg_reward:.3f}, t={elapsed:.1f}s).')
+            return None
+
+        if verbose:
+            print(f'  MORE: plan verified ({successes}/{n_tries}, '
+                  f'avg_reward={avg_reward:.3f}, t={elapsed:.1f}s).')
+        self._last_verify = (successes, avg_reward, n_tries)
+        return plan
+
+    def verify(self, plan: list[dict], initial_state: dict,
+               verbose: bool = True) -> tuple[int, float, float, bool]:
+        ctx = (self.env.push_steps_ctx(self.verify_push_steps)
+               if hasattr(self.env, 'push_steps_ctx') else _NullCtx())
+        with ctx:
+            n_tries = max(self.min_verify_envs, self.batch_size)
+            successes, avg_reward = _verify_plan(
+                self.env, plan, copy.deepcopy(initial_state),
+                n_tries, verbose=verbose)
+        rate = successes / n_tries
+        return successes, avg_reward, rate, rate >= self.verify_threshold
+
+
+class _NullCtx:
+    def __enter__(self): return self
+    def __exit__(self, *a): return False

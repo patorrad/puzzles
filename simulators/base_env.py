@@ -227,10 +227,40 @@ class SimulatorEnv(ABC):
     def _action_to_stroke(self, action: Dict,
                           approach_dist: float = 0.12,
                           push_dist: float = 0.25) -> Tuple[str, list, list]:
-        """Convert action dict to (pusher_type, start_3d, end_3d). (Parallel mode only)"""
+        """Convert action dict to (pusher_type, start_3d, end_3d). (Parallel mode only)
+
+        Supports two action dict formats:
+
+        Cardinal (existing PUCT / MCTS actions):
+            action_type : 'push_n' | 'pull_s' | 'push_e' | 'push_w'
+            push_pos    : (2,) xy position of the object being pushed
+            push_z      : float height
+
+        Arbitrary-direction (MORE contour pushes):
+            action_type   : 'push_dir'
+            push_start_xy : (2,) world XY of the pusher approach start
+            push_end_xy   : (2,) world XY of the pusher stroke end
+            push_z        : float height
+            obj_idx       : int (used by PPN; not consumed by sim)
+
+        For 'push_dir' the pusher arm (ns vs ew) is chosen by the dominant
+        axis of the stroke so the arm orientation roughly aligns with the
+        direction of motion.
+        """
         atype = action['action_type']
-        pos   = action['push_pos']
         z     = action['push_z']
+
+        if atype == 'push_dir':
+            s = action['push_start_xy']
+            e = action['push_end_xy']
+            dx = abs(float(e[0]) - float(s[0]))
+            dy = abs(float(e[1]) - float(s[1]))
+            pusher = 'ns' if dy >= dx else 'ew'
+            return (pusher,
+                    [float(s[0]), float(s[1]), z],
+                    [float(e[0]), float(e[1]), z])
+
+        pos = action['push_pos']
         if atype == 'push_n':
             return ('ns',
                     [pos[0], pos[1] - approach_dist, z],
