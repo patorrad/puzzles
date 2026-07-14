@@ -60,6 +60,17 @@ try:
     app_launcher = AppLauncher(headless=_headless, enable_cameras=_enable_cameras)
     simulation_app = app_launcher.app
 
+    # Point the Nucleus/cloud asset root at a local mirror, since compute-node
+    # asset streaming from omniverse-content-production S3 fails inside the
+    # container (OmniUsdResolver "Could not download local file"). Only the
+    # ground plane (spawned via GroundPlaneCfg) needs this — all puzzle
+    # objects are generated locally via _write_obstacle_usd.
+    import carb
+    _local_asset_root = _os.environ.get('ISAAC_LOCAL_ASSET_ROOT', None)
+    if _local_asset_root:
+        carb.settings.get_settings().set(
+            "/persistent/isaac/asset_root/cloud", _local_asset_root
+        )
 
     import isaaclab.sim as sim_utils
     from isaaclab.sim import SimulationContext, SimulationCfg, PhysxCfg
