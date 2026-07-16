@@ -327,6 +327,8 @@ def _parse_args():
     p.add_argument('--max_depth',     type=int,   default=4)
     p.add_argument('--gamma',         type=float, default=0.5)
     p.add_argument('--c_uct',         type=float, default=2.0)
+    p.add_argument('--k_per_object',  type=int,   default=8,
+                   help='Contour samples per object per expansion (halving this ~halves sim calls)')
     p.add_argument('--seed',          type=int,   default=0)
     # Training
     p.add_argument('--epochs',     type=int,   default=100)
@@ -351,6 +353,7 @@ def main():
             max_depth=args.max_depth,
             gamma=args.gamma,
             c_uct=args.c_uct,
+            k_per_object=args.k_per_object,
             seed=args.seed,
         )
         records = collect_data(env, cfg_c)
