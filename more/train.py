@@ -97,6 +97,7 @@ class CollectConfig:
     k_per_object:  int   = 8
     c_uct:         float = 2.0
     seed:          int   = 0
+    checkpoint_path: str = None
 
 
 def collect_data(env, cfg: CollectConfig) -> list[dict]:
@@ -142,6 +143,10 @@ def collect_data(env, cfg: CollectConfig) -> list[dict]:
 
         records = tree.collect_transitions(root)
         all_records.extend(records)
+
+        if cfg.checkpoint_path:
+            torch.save(all_records, cfg.checkpoint_path)
+            print(f'[MORE] Checkpoint: {len(all_records)} transitions after scene {scene_idx+1}/{cfg.n_scenes}')
 
     print(f'[MORE] Collected {len(all_records)} transitions from {cfg.n_scenes} scenes.')
     return all_records
@@ -342,6 +347,7 @@ def _parse_args():
     p.add_argument('--batch_size', type=int,   default=256)
     p.add_argument('--lr',         type=float, default=1e-3)
     p.add_argument('--device',     default='cuda' if torch.cuda.is_available() else 'cpu')
+    p.add_argument('--k_per_object', type=int, default=8)
     return p.parse_args()
 
 
@@ -362,6 +368,8 @@ def main():
             c_uct=args.c_uct,
             k_per_object=args.k_per_object,
             seed=args.seed,
+            k_per_object=args.k_per_object,
+            checkpoint_path=args.data,
         )
         records = collect_data(env, cfg_c)
         if args.phase == 'collect':
