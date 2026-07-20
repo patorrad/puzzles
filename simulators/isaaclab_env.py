@@ -67,11 +67,27 @@ try:
     # Kit boots) — setting it via carb.settings *after* AppLauncher() is too
     # late, since isaaclab.utils.assets reads this setting once at import
     # time during Kit's own extension startup.
+    # Suppress Carbonite verbose output.  Set the env var *before* Kit reads
+    # it (env var is checked earlier than kit_args), then also pass the kit
+    # args as a list so each flag is a separate entry (a single space-joined
+    # string would be treated as one malformed arg by AppLauncher).
+    _os.environ.setdefault('CARB_LOG_LEVEL', '2')   # 0=verbose 1=info 2=warning
     _local_asset_root = _os.environ.get('ISAAC_LOCAL_ASSET_ROOT', None)
-    _kit_args = f'--/persistent/isaac/asset_root/cloud="{_local_asset_root}"' if _local_asset_root else None
+    _kit_args = '--/log/outputStreamLevel=warning --/log/level=warning'
+    if _local_asset_root:
+        _kit_args += f' --/persistent/isaac/asset_root/cloud="{_local_asset_root}"'
 
-    app_launcher = AppLauncher(headless=_headless, enable_cameras=_enable_cameras, kit_args=_kit_args)
+    app_launcher = AppLauncher(headless=_headless, enable_cameras=_enable_cameras,
+                               kit_args=_kit_args)
     simulation_app = app_launcher.app
+
+    # Post-launch: mute per-channel verbose output that slips through before
+    # kit_args take full effect (e.g. isaacsim.core.simulation_manager.plugin).
+    try:
+        import omni.log as _omni_log
+        _omni_log.set_level_threshold(_omni_log.Level.WARN)
+    except Exception:
+        pass
 
     import isaaclab.sim as sim_utils
     from isaaclab.sim import SimulationContext, SimulationCfg, PhysxCfg

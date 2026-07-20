@@ -176,13 +176,8 @@ class MORETree:
             # Expand — add children from contour samples, seed with PPN
             self._expand(leaf)
 
-            # Rollout — random playouts from each new child
-            for child in leaf.children:
-                if child.done or child.dead_end:
-                    continue
-                ret = self._rollout(child.state, child.depth)
-                child.rollout_rewards.append(ret)
-                child.N += 1
+            # Rollout — batch all new children in one vectorised sweep
+            self._batch_rollout_children(leaf.children, leaf.depth)
 
             # Backprop — update N up the path
             for node in path:
@@ -239,16 +234,17 @@ class MORETree:
         # Score all candidates with PPN in one batched forward pass
         if self.ppn is not None:
             B = len(candidates)
+            dev = next(self.ppn.parameters()).device
             state_tensors = {
-                'target_pos':    node.state['target_pos'].float().unsqueeze(0).expand(B, -1),
-                'target_quat':   node.state['target_quat'].float().unsqueeze(0).expand(B, -1),
-                'obstacle_pos':  node.state['obstacle_pos'].float().unsqueeze(0).expand(B, -1, -1),
-                'obstacle_quat': node.state['obstacle_quat'].float().unsqueeze(0).expand(B, -1, -1),
+                'target_pos':    node.state['target_pos'].float().unsqueeze(0).expand(B, -1).to(dev),
+                'target_quat':   node.state['target_quat'].float().unsqueeze(0).expand(B, -1).to(dev),
+                'obstacle_pos':  node.state['obstacle_pos'].float().unsqueeze(0).expand(B, -1, -1).to(dev),
+                'obstacle_quat': node.state['obstacle_quat'].float().unsqueeze(0).expand(B, -1, -1).to(dev),
             }
             push_tensors = {
-                'push_start_xy': torch.stack([a['push_start_xy'] for a in candidates]),
-                'push_end_xy':   torch.stack([a['push_end_xy']   for a in candidates]),
-                'push_z':        torch.tensor([float(a['push_z']) for a in candidates]),
+                'push_start_xy': torch.stack([a['push_start_xy'] for a in candidates]).to(dev),
+                'push_end_xy':   torch.stack([a['push_end_xy']   for a in candidates]).to(dev),
+                'push_z':        torch.tensor([float(a['push_z']) for a in candidates], device=dev),
             }
             with torch.no_grad():
                 q_all = self.ppn(state_tensors, push_tensors).tolist()
@@ -279,17 +275,80 @@ class MORETree:
             node.children.append(child)
 
     # ------------------------------------------------------------------
-    # Rollout — random contour pushes with discount
+    # Rollout — batched across all children simultaneously
     # ------------------------------------------------------------------
 
+    def _batch_rollout_children(self, children: list['MORENode'],
+                                parent_depth: int) -> None:
+        """
+        Run one random rollout for every non-terminal child in a single
+        vectorised sweep.  Each rollout step issues ONE batch_evaluate call
+        for all alive children instead of one call per child per step.
+
+        Mutates each child's rollout_rewards and N in place.
+        """
+        import random
+
+        alive_idx = [i for i, c in enumerate(children)
+                     if not c.done and not c.dead_end]
+        if not alive_idx:
+            return
+
+        states   = {i: copy.deepcopy(children[i].state) for i in alive_idx}
+        returns  = {i: 0.0 for i in alive_idx}
+        discount = 1.0
+
+        for step in range(self.rollout_depth):
+            if not alive_idx:
+                break
+            depth = parent_depth + 1 + step
+            if depth >= self.max_depth:
+                break
+
+            # Sample one random action per alive child
+            pairs: list = []
+            valid: list = []
+            for ci in alive_idx:
+                cands = self.sampler.sample(states[ci], k_per_object=4)
+                if cands:
+                    pairs.append((states[ci], random.choice(cands)))
+                    valid.append(ci)
+
+            if not pairs:
+                break
+
+            results = self._chunked_batch_evaluate(pairs)
+
+            next_alive: list = []
+            for ci, (new_state, reward, done) in zip(valid, results):
+                returns[ci] += discount * reward
+                if not done and not self.env._obstacles_dropped(new_state):
+                    states[ci] = new_state
+                    next_alive.append(ci)
+
+            alive_idx = next_alive
+            discount *= self.gamma
+
+        for i, child in enumerate(children):
+            child.rollout_rewards.append(returns.get(i, 0.0))
+            child.N += 1
+
+    def _chunked_batch_evaluate(self, pairs: list) -> list:
+        """Split pairs into n_envs-sized chunks to avoid overflowing the env pool."""
+        n = self.env.n_envs
+        results = []
+        for i in range(0, len(pairs), n):
+            results.extend(self.env.batch_evaluate(pairs[i:i + n]))
+        return results
+
     def _rollout(self, state: dict, start_depth: int) -> float:
-        import torch
+        """Single-trajectory rollout (kept for testing; not used in search())."""
         import random
         total = 0.0
         discount = 1.0
         current = copy.deepcopy(state)
-        for _ in range(self.rollout_depth):
-            if start_depth + _ >= self.max_depth:
+        for step in range(self.rollout_depth):
+            if start_depth + step >= self.max_depth:
                 break
             candidates = self.sampler.sample(current, k_per_object=4)
             if not candidates:

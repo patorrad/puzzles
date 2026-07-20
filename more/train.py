@@ -1,3 +1,19 @@
+from __future__ import annotations
+
+import sys as _sys, re as _re
+
+class _OmniFilter:
+    _pat = _re.compile(r'(\d{4}-\d{2}-\d{2}T|\[INFO\]|\[WARNING\]|\[ERROR\]).*'
+                       r'(omni|isaacsim|carb|isaac|kit|nv::|physx|usd|omniverse)',
+                       _re.IGNORECASE)
+    def __init__(self, s): self._s = s
+    def write(self, m):
+        if not self._pat.search(m): self._s.write(m)
+    def flush(self): self._s.flush()
+    def __getattr__(self, a): return getattr(self._s, a)
+
+_sys.stdout = _OmniFilter(_sys.stdout)
+
 """
 MORE training pipeline — Phases A and B.
 
@@ -24,18 +40,15 @@ Usage (CLI via Hydra):
     python -m more.train phase=both ...
 """
 
-from __future__ import annotations
-
 import argparse
 import copy
 import os
 import random
-import time
 from dataclasses import dataclass
 
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from more.contour_sampler import ContourSampler
@@ -110,7 +123,7 @@ def collect_data(env, cfg: CollectConfig) -> list[dict]:
     all_records: list[dict] = []
     rng = random.Random(cfg.seed)
 
-    for scene_idx in tqdm(range(cfg.n_scenes), desc='[MORE] Collecting data'):
+    for _ in tqdm(range(cfg.n_scenes), desc='[MORE] Collecting data'):
         seed = rng.randint(0, 2**31 - 1)
         state = env.reset(seed=seed)
 
@@ -123,12 +136,7 @@ def collect_data(env, cfg: CollectConfig) -> list[dict]:
             if leaf.done or leaf.dead_end or leaf.depth >= cfg.max_depth:
                 continue
             tree._expand(leaf)
-            for child in leaf.children:
-                if child.done or child.dead_end:
-                    continue
-                ret = tree._rollout(child.state, child.depth)
-                child.rollout_rewards.append(ret)
-                child.N += 1
+            tree._batch_rollout_children(leaf.children, leaf.depth)
             for node in path:
                 node.N += 1
 
@@ -249,7 +257,6 @@ def train_ppn(records: list[dict], n_obstacles: int,
     criterion = torch.nn.HuberLoss(reduction='none')
 
     B = len(records)
-    indices = torch.arange(B)
 
     for epoch in range(1, cfg.epochs + 1):
         perm = torch.randperm(B)

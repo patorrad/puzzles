@@ -1,3 +1,19 @@
+from __future__ import annotations
+
+import sys as _sys, re as _re
+
+class _OmniFilter:
+    _pat = _re.compile(r'(\d{4}-\d{2}-\d{2}T|\[INFO\]|\[WARNING\]|\[ERROR\]).*'
+                       r'(omni|isaacsim|carb|isaac|kit|nv::|physx|usd|omniverse)',
+                       _re.IGNORECASE)
+    def __init__(self, s): self._s = s
+    def write(self, m):
+        if not self._pat.search(m): self._s.write(m)
+    def flush(self): self._s.flush()
+    def __getattr__(self, a): return getattr(self._s, a)
+
+_sys.stdout = _OmniFilter(_sys.stdout)
+
 """
 Head-to-head evaluation: AlphaZero PUCT vs MORE.
 
@@ -21,8 +37,6 @@ Usage::
         --az_checkpoint alphazero_latest.pt \\
         --output results.csv
 """
-
-from __future__ import annotations
 
 import argparse
 import copy
@@ -56,14 +70,14 @@ class EpisodeResult:
 # ---------------------------------------------------------------------------
 
 def _run_episode(env, planner, initial_state: dict, seed: int,
-                 planner_name: str, verbose: bool) -> EpisodeResult:
+                 planner_name: str, verbose: bool) -> tuple['EpisodeResult', list | None]:
     env.reset_sim_counters()
     t0 = time.perf_counter()
     plan = planner.plan(copy.deepcopy(initial_state), verbose=verbose)
     elapsed = time.perf_counter() - t0
 
     success = plan is not None and len(plan) > 0
-    return EpisodeResult(
+    result = EpisodeResult(
         seed=seed,
         planner=planner_name,
         success=success,
@@ -72,6 +86,7 @@ def _run_episode(env, planner, initial_state: dict, seed: int,
         batch_calls=env.batch_calls,
         total_pairs=env.total_pairs,
     )
+    return result, (plan if success else None)
 
 
 # ---------------------------------------------------------------------------
@@ -171,11 +186,12 @@ def _build_more_planner(env, args):
         env=env,
         ppn_path=ppn_path,
         n_simulations=args.more_n_sim,
-        max_depth=args.max_depth,
+        tree_depth=args.more_tree_depth,
+        n_plan_steps=args.more_plan_steps,
         gamma=args.more_gamma,
         k_per_object=args.more_k,
         seed=args.seed,
-        verify_threshold=args.verify_threshold,
+        verify_threshold=0.0,   # contour pushes are stochastic; trust direct execution
         min_verify_envs=args.n_envs,
     )
 
@@ -199,8 +215,10 @@ def _parse_args():
     p.add_argument('--n_runs',  type=int,   default=20)
     p.add_argument('--seed',    type=int,   default=0,
                    help='Base seed; run i uses seed+i')
-    p.add_argument('--max_depth',         type=int,   default=10)
-    p.add_argument('--verify_threshold',  type=float, default=0.75)
+    p.add_argument('--max_depth',         type=int,   default=10,
+                   help='AlphaZero MCTS depth')
+    p.add_argument('--verify_threshold',  type=float, default=0.75,
+                   help='AlphaZero verification threshold (MORE always uses 0.0)')
     p.add_argument('--output',  default='comparison_results.csv')
     p.add_argument('--verbose', action='store_true')
     # AlphaZero
@@ -211,10 +229,22 @@ def _parse_args():
     # MORE
     p.add_argument('--more_checkpoint', default=None,
                    help='Path to PPN checkpoint (.pt); omit for unguided MORE')
-    p.add_argument('--more_n_sim', type=int,   default=500)
-    p.add_argument('--more_gamma', type=float, default=0.5)
-    p.add_argument('--more_k',     type=int,   default=8,
+    p.add_argument('--more_n_sim',       type=int,   default=100)
+    p.add_argument('--more_tree_depth',  type=int,   default=3,
+                   help='MORE MCTS tree depth (paper uses 3)')
+    p.add_argument('--more_plan_steps',  type=int,   default=30,
+                   help='Max planning steps in the real env (separate from tree depth)')
+    p.add_argument('--more_gamma',       type=float, default=0.5)
+    p.add_argument('--more_k',           type=int,   default=4,
                    help='Contour samples per object')
+    # WandB
+    p.add_argument('--wandb',            action='store_true')
+    p.add_argument('--wandb_project',    default='puzzle-comparison')
+    p.add_argument('--wandb_entity',     default=None)
+    p.add_argument('--log_video',        action='store_true',
+                   help='Record and upload a replay video for every episode')
+    p.add_argument('--video_dir',        default='eval_videos',
+                   help='Directory to write mp4 files before uploading')
     return p.parse_args()
 
 
@@ -238,12 +268,42 @@ def _build_env(sim: str, n_obs: int, n_envs: int):
     return build_env(cfg, n_envs=n_envs, viewer_mode='headless')
 
 
+def _record_video(env, plan, initial_state, name, seed, video_dir) -> str | None:
+    """Replay plan through physics and save mp4. Returns path or None on failure."""
+    if not hasattr(env, 'record_replay'):
+        return None
+    os.makedirs(video_dir, exist_ok=True)
+    path = os.path.join(video_dir, f'{name}_seed{seed:04d}.mp4')
+    try:
+        return env.record_replay(plan, copy.deepcopy(initial_state), path)
+    except Exception as e:
+        print(f'[eval] record_replay failed ({name} seed={seed}): {e}',
+              file=__import__('sys').stderr)
+        return None
+
+
 def main():
     args = _parse_args()
+
+    # ---------- wandb ----------
+    wb = None
+    if args.wandb:
+        try:
+            import wandb as _wb
+            wb = _wb
+            wb.init(project=args.wandb_project,
+                    entity=args.wandb_entity or None,
+                    config=vars(args))
+            print(f'[eval] wandb run: {wb.run.url}')
+        except Exception as e:
+            print(f'[eval] wandb init failed: {e}', file=__import__('sys').stderr)
+            wb = None
 
     # ---------- simulator ----------
     if args.sim == 'isaaclab':
         os.environ.setdefault('ISAACLAB_HEADLESS', '1')
+        if args.log_video:
+            os.environ['ISAACLAB_ENABLE_CAMERAS'] = '1'
 
     print(f'[eval] Building env: sim={args.sim}, n_obs={args.n_obs}, '
           f'n_envs={args.n_envs}')
@@ -267,9 +327,12 @@ def main():
 
         print(f'\n[eval] Run {run_i + 1}/{args.n_runs}  seed={seed}')
 
+        run_log: dict = {'run_i': run_i, 'seed': seed}
+        plans: dict = {}
+
         for planner, name in [(az_planner, 'AlphaZero'),
                                (more_planner, 'MORE')]:
-            res = _run_episode(
+            res, plan = _run_episode(
                 env, planner, state_copy, seed, name, verbose=args.verbose)
             status = 'OK ' if res.success else 'FAIL'
             print(f'  {name:12s} [{status}] '
@@ -278,6 +341,27 @@ def main():
                   f'batch_calls={res.batch_calls:6d}  '
                   f'total_pairs={res.total_pairs:7d}')
             all_results.append(res)
+            plans[name] = plan
+
+            run_log[f'{name}/success']     = int(res.success)
+            run_log[f'{name}/plan_length'] = res.plan_length
+            run_log[f'{name}/plan_time_s'] = res.plan_time_s
+            run_log[f'{name}/batch_calls'] = res.batch_calls
+            run_log[f'{name}/total_pairs'] = res.total_pairs
+
+        # Record videos before logging so they go in the same wandb step
+        if args.log_video:
+            for name, plan in plans.items():
+                if plan:
+                    vid = _record_video(env, plan, state_copy, name, seed,
+                                        args.video_dir)
+                    if vid and wb:
+                        run_log[f'{name}/video'] = wb.Video(vid, fps=30,
+                                                             format='mp4')
+
+        # Single wb.log call per run → step aligns with run_i
+        if wb:
+            wb.log(run_log, step=run_i)
 
     # ---------- aggregate and display ----------
     az_results   = [r for r in all_results if r.planner == 'AlphaZero']
@@ -286,6 +370,12 @@ def main():
     agg_rows = [_aggregate(az_results), _aggregate(more_results)]
     print('\n=== Comparison Summary ===')
     _print_table(agg_rows)
+
+    if wb:
+        for row in agg_rows:
+            wb.log({f"summary/{row['planner']}/{k}": v
+                    for k, v in row.items() if k != 'planner'})
+        wb.finish()
 
     # ---------- save ----------
     _save_csv(all_results, args.output)

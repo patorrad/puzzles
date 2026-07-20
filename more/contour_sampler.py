@@ -44,22 +44,26 @@ class ContourSampler:
 
     def __init__(self,
                  obj_half_extent: float,
-                 approach_dist: float = 0.02,
+                 approach_dist: float = 0.12,
+                 push_through: float = 0.25,
                  z_levels: list[float] | None = None,
                  include_target: bool = True):
         self.obj_half_extent = obj_half_extent
         self.approach_dist = approach_dist
+        self.push_through = push_through
         self.z_levels = z_levels if z_levels else [0.025]
         self.include_target = include_target
 
     @classmethod
     def from_env(cls, env,
-                 approach_dist: float = 0.02,
+                 approach_dist: float = 0.12,
+                 push_through: float = 0.25,
                  include_target: bool = True) -> 'ContourSampler':
         """Build a ContourSampler from a SimulatorEnv instance."""
         return cls(
             obj_half_extent=env._OBJ_SIZE / 2.0,
             approach_dist=approach_dist,
+            push_through=push_through,
             z_levels=list(env.z_levels),
             include_target=include_target,
         )
@@ -89,10 +93,16 @@ class ContourSampler:
             for z in self.z_levels:
                 starts = self._contour_samples(center_xy, k_per_object)
                 for start_xy in starts:
+                    # Push direction: inward from start toward centroid
+                    inward = center_xy - start_xy
+                    norm = inward.norm()
+                    inward_unit = inward / norm if norm > 1e-6 else inward
+                    # End point: push_through past the centroid (same as AlphaZero push_dist)
+                    end_xy = center_xy + inward_unit * self.push_through
                     actions.append({
                         'action_type':   'push_dir',
                         'push_start_xy': start_xy,
-                        'push_end_xy':   center_xy.clone(),
+                        'push_end_xy':   end_xy,
                         'push_z':        z,
                         'obj_idx':       obj_idx,
                     })
@@ -104,10 +114,14 @@ class ContourSampler:
         actions: list[dict] = []
         for z in self.z_levels:
             for start_xy in self._contour_samples(center_xy, k):
+                inward = center_xy - start_xy
+                norm = inward.norm()
+                inward_unit = inward / norm if norm > 1e-6 else inward
+                end_xy = center_xy + inward_unit * self.push_through
                 actions.append({
                     'action_type':   'push_dir',
                     'push_start_xy': start_xy,
-                    'push_end_xy':   center_xy.clone(),
+                    'push_end_xy':   end_xy,
                     'push_z':        z,
                     'obj_idx':       obj_idx,
                 })
