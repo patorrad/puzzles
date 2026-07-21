@@ -347,7 +347,6 @@ def _parse_args():
     p.add_argument('--batch_size', type=int,   default=256)
     p.add_argument('--lr',         type=float, default=1e-3)
     p.add_argument('--device',     default='cuda' if torch.cuda.is_available() else 'cpu')
-    p.add_argument('--k_per_object', type=int, default=8)
     return p.parse_args()
 
 
