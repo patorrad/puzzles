@@ -368,7 +368,6 @@ def main():
             c_uct=args.c_uct,
             k_per_object=args.k_per_object,
             seed=args.seed,
-            k_per_object=args.k_per_object,
             checkpoint_path=args.data,
         )
         records = collect_data(env, cfg_c)

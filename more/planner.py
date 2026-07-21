@@ -163,18 +163,20 @@ class MOREPlanner:
         if not plan:
             return None
 
-        # If the target exited during direct execution, trust it — contour
-        # pushes are too stochastic to pass replay-based verification.
-        if done_in_plan:
+        # Success only if the target actually exited the bin during execution.
+        # verify_threshold=0.0 skips the stochastic replay test but does NOT
+        # override the goal-completion requirement.
+        if not done_in_plan:
             if verbose:
-                _log(f'  MORE: done in {len(plan)} steps (t={elapsed:.1f}s).')
-            return plan
+                _log(f'  MORE: {len(plan)} steps but goal not reached (t={elapsed:.1f}s).')
+            return None
 
-        # Otherwise verify the partial plan (threshold defaults to 0.0 so this
-        # always passes unless the caller explicitly raises the bar).
+        if verbose:
+            _log(f'  MORE: done in {len(plan)} steps (t={elapsed:.1f}s).')
+
+        # Goal reached — skip replay verification (contour pushes are too
+        # stochastic to reliably pass a fixed-plan replay test).
         if self.verify_threshold <= 0.0:
-            if verbose:
-                _log(f'  MORE: {len(plan)} steps, no goal reached (t={elapsed:.1f}s).')
             return plan
 
         ctx = (self.env.push_steps_ctx(self.verify_push_steps)
