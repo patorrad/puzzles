@@ -159,5 +159,5 @@ class ContourSampler:
             scale = r / max(abs(dx), abs(dy))
             sx = float(center_xy[0]) + dx * scale
             sy = float(center_xy[1]) + dy * scale
-            starts.append(torch.tensor([sx, sy], dtype=torch.float32))
+            starts.append(torch.tensor([sx, sy], dtype=torch.float32, device=center_xy.device))
         return starts
