@@ -75,6 +75,9 @@ class EpisodeResult:
     total_object_displacement:  float | None = None
     n_objects_moved:            int   | None = None
     objects_displaced_from_bin: int   | None = None
+    # verification (same logic as benchmark.py)
+    verify_successes:           int   | None = None
+    verify_rate:                float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -172,12 +175,14 @@ def _aggregate(results: list[EpisodeResult]) -> dict:
     mov_vals  = [r.n_objects_moved for r in successes if r.n_objects_moved is not None]
     out_vals  = [r.objects_displaced_from_bin for r in successes if r.objects_displaced_from_bin is not None]
     nfp_vals  = [r.network_forward_passes for r in results if r.network_forward_passes is not None]
+    vr_vals   = [r.verify_rate for r in results if r.verify_rate is not None]
 
     pd_m, pd_s = _s(push_vals) if push_vals else (float('nan'), float('nan'))
     od_m, od_s = _s(disp_vals) if disp_vals else (float('nan'), float('nan'))
     mv_m, _    = _s(mov_vals)  if mov_vals  else (float('nan'), float('nan'))
     ot_m, _    = _s(out_vals)  if out_vals  else (float('nan'), float('nan'))
     nf_m, _    = _s(nfp_vals)  if nfp_vals  else (float('nan'), float('nan'))
+    vr_m, _    = _s(vr_vals)   if vr_vals   else (float('nan'), float('nan'))
 
     budget_cap = results[0].budget_cap
 
@@ -203,6 +208,7 @@ def _aggregate(results: list[EpisodeResult]) -> dict:
         'obj_disp_std_m':       _fmt(od_s),
         'n_moved_mean':         _fmt(mv_m),
         'n_out_of_bin_mean':    _fmt(ot_m),
+        'verify_rate_mean':     _fmt(vr_m),
     }
 
 
@@ -486,6 +492,13 @@ def main():
                 except Exception as e:
                     print(f'  [eval] plan replay for metrics failed ({name}): {e}')
 
+            # ---- verification (same logic as benchmark.py) ----
+            if plan is not None:
+                v_succ, _, v_rate, _ = planner.verify(plan, state_copy, verbose=False)
+                res.verify_successes = v_succ
+                res.verify_rate      = v_rate
+                print(f'  {name:12s} verify: {v_succ}/{env.n_envs} ({v_rate:.0%})')
+
             status = 'OK ' if res.success else 'FAIL'
             print(f'  {name:12s} [{status}] '
                   f'plan_len={res.plan_length:3d}  '
@@ -504,7 +517,10 @@ def main():
             if res.total_push_distance is not None:
                 run_log[f'{name}/push_dist']  = res.total_push_distance
             if res.total_object_displacement is not None:
-                run_log[f'{name}/obj_disp']   = res.total_object_displacement
+                run_log[f'{name}/obj_disp']      = res.total_object_displacement
+            if res.verify_rate is not None:
+                run_log[f'{name}/verify_rate']   = res.verify_rate
+                run_log[f'{name}/verify_successes'] = res.verify_successes
 
         # Record videos before logging so they go in the same wandb step
         if args.log_video:

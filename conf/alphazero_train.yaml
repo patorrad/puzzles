@@ -26,8 +26,8 @@ viewer: headless
 # Training
 net_arch: mlp   # 'mlp' | 'resnet' | 'transformer' (transformer is solver-only; stacker falls back to resnet)
 n_iterations: 100
-episodes_per_iter: 64 #32
-train_steps_per_iter: 200 #100
+episodes_per_iter: 32
+train_steps_per_iter: 100
 batch_size: 128
 buffer_size: 50000
 lr: 1.0e-3
