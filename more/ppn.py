@@ -1,28 +1,23 @@
 """
 Push Prediction Network (PPN) for MORE (Huang et al., ICRA 2022).
 
-Architecture: DeepSets over the object set (permutation-invariant over N obstacles)
-combined with a push encoding to predict a single Q-value per (state, push) pair.
+Two architecture options, both selected via ``build_ppn(arch, n_obstacles)``:
 
-Single-pass inference path::
+``arch='deepsets'`` — ``PPN``
+    DeepSets over the object set (permutation-invariant over N obstacles)
+    combined with a push encoding.
 
-    states  (batch, ...)   push_descs (batch, ...)
-         └──────────────────────────┘
-                        │
-                  PPN.forward(states, pushes) → Q  (batch,)
+``arch='mlp'`` — ``PPNFlat``
+    Flat MLP matching AlphaZero's SolverNet style.  Section-contiguous
+    scene encoding (target_xyz + obs_xyz + target_quat + obs_quat) concatenated
+    with push features, fed through a 2-layer trunk.
 
-Single-sample path (used inside the tree search)::
+Both classes expose the same interface::
 
-    PPN.forward_single(state_dict, push_dict) → Q  scalar
+    forward(states_dict, pushes_dict) → (B,)
+    forward_single(state_dict, push_dict) → scalar
 
-Both paths share the same weights; forward_single just adds a batch dimension.
-
-Input encoding
---------------
-Per object:  xyz (3) + quat (4) + is_target (1) = 8 dims → φ-MLP → obj_emb_dim
-After object-set aggregation (element-wise max + sum):  2 * obj_emb_dim
-Push encoding:  push_start_xy (2) + push_dir_xy (2, unit) + push_z (1) = 5 → ψ-MLP → push_emb_dim
-Combined:  cat(agg, push_enc) → MLP → Linear(1) → Q scalar
+Use ``build_ppn`` to construct either architecture.
 """
 
 from __future__ import annotations
@@ -30,6 +25,8 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+from alphazero.encoders import _canonical_quat
 
 
 class PPN(nn.Module):
@@ -186,3 +183,144 @@ class PPN(nn.Module):
 
         push_feat = torch.cat([start, direction_unit, z], dim=-1)  # (B, 5)
         return self.psi(push_feat)
+
+
+# ---------------------------------------------------------------------------
+# PPNFlat — flat MLP matching AlphaZero SolverNet style
+# ---------------------------------------------------------------------------
+
+def _push_features(pushes: dict) -> torch.Tensor:
+    """Shared push feature encoder: (B, 5) — start_xy, dir_unit, z."""
+    start = pushes['push_start_xy'].float()
+    end   = pushes['push_end_xy'].float()
+    z     = pushes['push_z'].float()
+    if z.dim() == 1:
+        z = z.unsqueeze(-1)
+    direction = end - start
+    norm = direction.norm(dim=-1, keepdim=True).clamp(min=1e-6)
+    return torch.cat([start, direction / norm, z], dim=-1)  # (B, 5)
+
+
+class PPNFlat(nn.Module):
+    """
+    Flat-MLP Push Prediction Network.
+
+    Input: section-contiguous scene encoding (matching AlphaZero's
+    ``encode_solver_state``, minus grid one-hots) concatenated with push
+    features.  Total input dim = 7*(1+N) + 5.
+
+    Parameters
+    ----------
+    n_obstacles : int
+    hidden : int
+        Width of both hidden layers (default 128, matching AlphaZero's trunk).
+    """
+
+    PUSH_DIM = 5  # start_xy(2) + dir_unit(2) + z(1)
+
+    def __init__(self, n_obstacles: int, hidden: int = 128):
+        super().__init__()
+        self.n_obstacles = n_obstacles
+        in_dim = 7 * (1 + n_obstacles) + self.PUSH_DIM
+        self.trunk = nn.Sequential(
+            nn.Linear(in_dim, hidden), nn.ReLU(),
+            nn.Linear(hidden, hidden), nn.ReLU(),
+        )
+        self.head = nn.Linear(hidden, 1)
+
+    # ------------------------------------------------------------------
+
+    def forward(self, states: dict, pushes: dict) -> torch.Tensor:
+        """
+        Parameters
+        ----------
+        states : dict
+            'target_pos'    : (B, 3)
+            'target_quat'   : (B, 4)
+            'obstacle_pos'  : (B, N, 3)
+            'obstacle_quat' : (B, N, 4)
+        pushes : dict
+            'push_start_xy' : (B, 2)
+            'push_end_xy'   : (B, 2)
+            'push_z'        : (B,)
+
+        Returns
+        -------
+        q : (B,)
+        """
+        scene = self._encode_scene(states)          # (B, 7*(1+N))
+        push  = _push_features(pushes)              # (B, 5)
+        x = torch.cat([scene, push], dim=-1)
+        return self.head(self.trunk(x)).squeeze(-1)
+
+    def forward_single(self, state: dict, push: dict) -> torch.Tensor:
+        """Unbatched forward for use inside tree search → scalar."""
+        batched_state = {
+            'target_pos':    state['target_pos'].unsqueeze(0),
+            'target_quat':   state['target_quat'].unsqueeze(0),
+            'obstacle_pos':  state['obstacle_pos'].unsqueeze(0),
+            'obstacle_quat': state['obstacle_quat'].unsqueeze(0),
+        }
+        batched_push = {
+            'push_start_xy': push['push_start_xy'].unsqueeze(0),
+            'push_end_xy':   push['push_end_xy'].unsqueeze(0),
+            'push_z':        torch.as_tensor(push['push_z']).float().unsqueeze(0),
+        }
+        return self.forward(batched_state, batched_push).squeeze(0)
+
+    # ------------------------------------------------------------------
+
+    def _encode_scene(self, states: dict) -> torch.Tensor:
+        """Section-contiguous: target_xyz + obs_xyz + target_quat + obs_quat → (B, 7*(1+N))."""
+        B = states['target_pos'].shape[0]
+        N = self.n_obstacles
+
+        t_pos  = states['target_pos'].float()[:, :3]           # (B, 3)
+        t_quat = _canonical_quat(states['target_quat'].float()) # (B, 4)
+
+        obs_pos  = states['obstacle_pos'].float()[:, :N, :3]   # (B, N, 3)
+        obs_quat = states['obstacle_quat'].float()[:, :N, :]   # (B, N, 4)
+
+        # Pad if scene has fewer obstacles than expected
+        actual_n = obs_pos.shape[1]
+        if actual_n < N:
+            pad_n = N - actual_n
+            obs_pos  = F.pad(obs_pos,  (0, 0, 0, pad_n))
+            obs_quat = F.pad(obs_quat, (0, 0, 0, pad_n))
+
+        # Canonicalize obstacle quats: reshape (B, N, 4) → (B*N, 4) → back
+        obs_quat_flat = _canonical_quat(obs_quat.reshape(B * N, 4))
+        obs_quat = obs_quat_flat.reshape(B, N, 4)
+
+        return torch.cat([
+            t_pos,                       # (B, 3)
+            obs_pos.reshape(B, N * 3),   # (B, 3N)
+            t_quat,                      # (B, 4)
+            obs_quat.reshape(B, N * 4),  # (B, 4N)
+        ], dim=-1)
+
+
+# ---------------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------------
+
+def build_ppn(arch: str, n_obstacles: int, **kwargs) -> 'PPN | PPNFlat':
+    """
+    Construct a PPN by architecture name.
+
+    Parameters
+    ----------
+    arch : str
+        ``'deepsets'`` → :class:`PPN`, ``'mlp'`` → :class:`PPNFlat`.
+    n_obstacles : int
+    **kwargs
+        Passed to the chosen class constructor.
+        For ``'deepsets'``: ``obj_emb_dim``, ``push_emb_dim``, ``agg_hidden``.
+        For ``'mlp'``: ``hidden``.
+    """
+    if arch == 'deepsets':
+        return PPN(n_obstacles=n_obstacles, **kwargs)
+    elif arch == 'mlp':
+        return PPNFlat(n_obstacles=n_obstacles, **kwargs)
+    else:
+        raise ValueError(f"Unknown PPN arch '{arch}'. Choose 'deepsets' or 'mlp'.")

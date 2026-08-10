@@ -196,6 +196,19 @@ def _build_more_planner(env, args):
     )
 
 
+def _build_mcts_planner(env, args):
+    from planner import MCTSPusher
+    return MCTSPusher(
+        env=env,
+        n_simulations=args.mcts_n_sim,
+        max_depth=args.max_depth,
+        c_ucb=args.mcts_c_ucb,
+        seed=args.seed,
+        verify_threshold=args.verify_threshold,
+        min_verify_envs=args.n_envs,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -209,9 +222,16 @@ def _parse_args():
     p.add_argument('--sim',     default='isaaclab',
                    choices=['isaaclab', 'genesis'],
                    help='Simulator backend')
-    p.add_argument('--n_obs',   type=int,   default=2)
-    p.add_argument('--n_envs',  type=int,   default=16,
+    p.add_argument('--n_obs',      type=int,   default=2)
+    p.add_argument('--n_envs',     type=int,   default=16,
                    help='Parallel envs (for verification)')
+    p.add_argument('--stackable',  action='store_true',
+                   help='Enable stackable objects (must match training config)')
+    p.add_argument('--n_z_levels', type=int,   default=1,
+                   help='Push height levels (must match training config)')
+    p.add_argument('--bin_size',   type=float, default=None,
+                   help='Fixed bin side length in metres; null = auto-scale with n_obs. '
+                        'Use 0.4 to keep the N=7 bin size regardless of n_obs.')
     p.add_argument('--n_runs',  type=int,   default=20)
     p.add_argument('--seed',    type=int,   default=0,
                    help='Base seed; run i uses seed+i')
@@ -226,6 +246,13 @@ def _parse_args():
                    help='Path to AlphaZero checkpoint (.pt)')
     p.add_argument('--az_n_sim',   type=int,   default=500)
     p.add_argument('--az_c_puct',  type=float, default=1.5)
+    # Vanilla MCTS
+    p.add_argument('--vanilla_mcts',  action='store_true',
+                   help='Include vanilla UCB1 MCTS (no neural net) as a third planner')
+    p.add_argument('--mcts_n_sim',    type=int,   default=500,
+                   help='Simulations for vanilla MCTS')
+    p.add_argument('--mcts_c_ucb',    type=float, default=1.4,
+                   help='UCB exploration constant for vanilla MCTS')
     # MORE
     p.add_argument('--more_checkpoint', default=None,
                    help='Path to PPN checkpoint (.pt); omit for unguided MORE')
@@ -248,7 +275,9 @@ def _parse_args():
     return p.parse_args()
 
 
-def _build_env(sim: str, n_obs: int, n_envs: int):
+def _build_env(sim: str, n_obs: int, n_envs: int,
+               stackable: bool = False, n_z_levels: int = 1,
+               bin_size: float | None = None):
     """Build a BinEnv by loading the project's Hydra YAML config files."""
     from simulators import build_env
 
@@ -257,12 +286,18 @@ def _build_env(sim: str, n_obs: int, n_envs: int):
     sim_cfg = OmegaConf.load(os.path.join(conf_dir, 'simulator', f'{sim}.yaml'))
     rew_cfg = OmegaConf.load(os.path.join(conf_dir, 'reward', 'default.yaml'))
 
-    cfg = OmegaConf.merge(base, {
+    overrides = {
         'simulator':   sim_cfg,
         'reward':      rew_cfg,
         'n_obstacles': n_obs,
+        'stackable':   stackable,
+        'n_z_levels':  n_z_levels,
         'seed':        None,
-    })
+    }
+    if bin_size is not None:
+        overrides['bin_size'] = bin_size
+
+    cfg = OmegaConf.merge(base, overrides)
     OmegaConf.set_struct(cfg, False)
     cfg.pop('defaults', None)
     return build_env(cfg, n_envs=n_envs, viewer_mode='headless')
@@ -306,8 +341,11 @@ def main():
             os.environ['ISAACLAB_ENABLE_CAMERAS'] = '1'
 
     print(f'[eval] Building env: sim={args.sim}, n_obs={args.n_obs}, '
-          f'n_envs={args.n_envs}')
-    env = _build_env(args.sim, n_obs=args.n_obs, n_envs=args.n_envs)
+          f'n_envs={args.n_envs}, stackable={args.stackable}, '
+          f'n_z_levels={args.n_z_levels}, bin_size={args.bin_size}')
+    env = _build_env(args.sim, n_obs=args.n_obs, n_envs=args.n_envs,
+                     stackable=args.stackable, n_z_levels=args.n_z_levels,
+                     bin_size=args.bin_size)
 
     # ---------- planners ----------
     print(f'[eval] Building AlphaZero planner (checkpoint={args.az_checkpoint})')
@@ -316,6 +354,13 @@ def main():
     ppn_status = args.more_checkpoint or 'unguided'
     print(f'[eval] Building MORE planner (ppn={ppn_status})')
     more_planner = _build_more_planner(env, args)
+
+    planners = [(az_planner, 'AlphaZero'), (more_planner, 'MORE')]
+
+    if args.vanilla_mcts:
+        print(f'[eval] Building vanilla MCTS planner (n_sim={args.mcts_n_sim})')
+        mcts_planner = _build_mcts_planner(env, args)
+        planners.append((mcts_planner, 'VanillaMCTS'))
 
     # ---------- run ----------
     all_results: list[EpisodeResult] = []
@@ -330,8 +375,7 @@ def main():
         run_log: dict = {'run_i': run_i, 'seed': seed}
         plans: dict = {}
 
-        for planner, name in [(az_planner, 'AlphaZero'),
-                               (more_planner, 'MORE')]:
+        for planner, name in planners:
             res, plan = _run_episode(
                 env, planner, state_copy, seed, name, verbose=args.verbose)
             status = 'OK ' if res.success else 'FAIL'
@@ -352,22 +396,27 @@ def main():
         # Record videos before logging so they go in the same wandb step
         if args.log_video:
             for name, plan in plans.items():
-                if plan:
-                    vid = _record_video(env, plan, state_copy, name, seed,
-                                        args.video_dir)
-                    if vid and wb:
-                        run_log[f'{name}/video'] = wb.Video(vid, fps=30,
-                                                             format='mp4')
+                if not plan:
+                    print(f'  [video] {name}: skipped (no successful plan)')
+                    continue
+                vid = _record_video(env, plan, state_copy, name, seed,
+                                    args.video_dir)
+                if vid is None:
+                    print(f'  [video] {name}: record_replay returned None '
+                          f'(no frames captured or error)')
+                elif wb:
+                    run_log[f'{name}/video'] = wb.Video(vid, fps=30,
+                                                         format='mp4')
+                    print(f'  [video] {name}: logged to wandb ({vid})')
 
         # Single wb.log call per run → step aligns with run_i
         if wb:
             wb.log(run_log, step=run_i)
 
     # ---------- aggregate and display ----------
-    az_results   = [r for r in all_results if r.planner == 'AlphaZero']
-    more_results = [r for r in all_results if r.planner == 'MORE']
-
-    agg_rows = [_aggregate(az_results), _aggregate(more_results)]
+    planner_names = [name for _, name in planners]
+    agg_rows = [_aggregate([r for r in all_results if r.planner == name])
+                for name in planner_names]
     print('\n=== Comparison Summary ===')
     _print_table(agg_rows)
 

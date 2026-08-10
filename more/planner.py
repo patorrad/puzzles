@@ -24,17 +24,19 @@ def _log(msg): print(msg, file=sys.stderr, flush=True)
 from planner import _verify_plan
 from more.contour_sampler import ContourSampler
 from more.mcts import MORETree
-from more.ppn import PPN
+from more.ppn import build_ppn
 
 
-def _load_ppn(path: str, n_obstacles: int) -> PPN:
+def _load_ppn(path: str, n_obstacles: int):
     ckpt = torch.load(path, map_location='cpu', weights_only=False)
-    net = PPN(
-        n_obstacles=n_obstacles,
-        obj_emb_dim=ckpt.get('obj_emb_dim', 64),
-        push_emb_dim=ckpt.get('push_emb_dim', 64),
-        agg_hidden=ckpt.get('agg_hidden', 128),
-    )
+    arch = ckpt.get('arch', 'deepsets')
+    if arch == 'deepsets':
+        kwargs = dict(obj_emb_dim=ckpt.get('obj_emb_dim', 64),
+                      push_emb_dim=ckpt.get('push_emb_dim', 64),
+                      agg_hidden=ckpt.get('agg_hidden', 128))
+    else:
+        kwargs = dict(hidden=ckpt.get('hidden', 128))
+    net = build_ppn(arch, n_obstacles=n_obstacles, **kwargs)
     net.load_state_dict(ckpt['ppn'])
     net.eval()
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -95,7 +97,7 @@ class MOREPlanner:
         if seed is not None:
             torch.manual_seed(seed)
 
-        self.ppn: PPN | None = None
+        self.ppn = None
         if ppn_path is not None:
             self.ppn = _load_ppn(ppn_path, env.n_obstacles)
 

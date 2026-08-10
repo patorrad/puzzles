@@ -100,7 +100,7 @@ def test_contour_sampler_action_format():
 # PPN — Push Prediction Network
 # ---------------------------------------------------------------------------
 
-from more.ppn import PPN
+from more.ppn import PPN, PPNFlat, build_ppn
 
 
 def _toy_state_batch(batch: int = 4, n_obs: int = 2):
@@ -163,6 +163,80 @@ def test_ppn_scalar_forward():
         q = net.forward_single(state, push)
     assert q.shape == (), f'expected scalar, got {q.shape}'
     assert torch.isfinite(q)
+
+
+def test_ppn_flat_output_shape():
+    """PPNFlat.forward returns (batch,) Q-values."""
+    net = PPNFlat(n_obstacles=2)
+    states = _toy_state_batch(batch=4, n_obs=2)
+    pushes = _toy_push_batch(batch=4)
+    q = net(states, pushes)
+    assert q.shape == (4,), f'expected (4,), got {q.shape}'
+
+
+def test_ppn_flat_input_dim():
+    """PPNFlat in_dim = 7*(1+N) + 5."""
+    for n in [2, 7]:
+        net = PPNFlat(n_obstacles=n)
+        expected_in = 7 * (1 + n) + 5
+        actual_in = net.trunk[0].in_features
+        assert actual_in == expected_in, f'n={n}: expected {expected_in}, got {actual_in}'
+
+
+def test_ppn_flat_gradient_flows():
+    """Gradients must flow through all PPNFlat parameters."""
+    net = PPNFlat(n_obstacles=2)
+    states = _toy_state_batch(batch=2, n_obs=2)
+    pushes = _toy_push_batch(batch=2)
+    q = net(states, pushes)
+    q.mean().backward()
+    for name, param in net.named_parameters():
+        assert param.grad is not None, f'No gradient for {name}'
+        assert not torch.isnan(param.grad).any(), f'NaN gradient for {name}'
+
+
+def test_ppn_flat_scalar_forward():
+    """PPNFlat.forward_single returns a scalar."""
+    net = PPNFlat(n_obstacles=2)
+    net.eval()
+    state = {
+        'target_pos':    torch.randn(3),
+        'target_quat':   torch.randn(4),
+        'obstacle_pos':  torch.randn(2, 3),
+        'obstacle_quat': torch.randn(2, 4),
+    }
+    push = {
+        'push_start_xy': torch.randn(2),
+        'push_end_xy':   torch.randn(2),
+        'push_z':        torch.tensor(0.025),
+    }
+    with torch.no_grad():
+        q = net.forward_single(state, push)
+    assert q.shape == (), f'expected scalar, got {q.shape}'
+    assert torch.isfinite(q)
+
+
+def test_build_ppn_deepsets():
+    """build_ppn('deepsets', ...) returns a PPN instance."""
+    net = build_ppn('deepsets', n_obstacles=3)
+    assert isinstance(net, PPN)
+
+
+def test_build_ppn_mlp():
+    """build_ppn('mlp', ...) returns a PPNFlat instance."""
+    net = build_ppn('mlp', n_obstacles=3)
+    assert isinstance(net, PPNFlat)
+
+
+def test_build_ppn_both_same_interface():
+    """Both architectures expose the same forward signature."""
+    states = _toy_state_batch(batch=3, n_obs=4)
+    pushes = _toy_push_batch(batch=3)
+    states_4 = {k: v for k, v in states.items()}  # n_obs=4 already
+    for arch in ['deepsets', 'mlp']:
+        net = build_ppn(arch, n_obstacles=4)
+        q = net(states_4, pushes)
+        assert q.shape == (3,), f'{arch}: expected (3,), got {q.shape}'
 
 
 # ---------------------------------------------------------------------------

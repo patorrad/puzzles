@@ -53,14 +53,16 @@ from tqdm import tqdm
 
 from more.contour_sampler import ContourSampler
 from more.mcts import MORETree
-from more.ppn import PPN
+from more.ppn import PPN, build_ppn
 
 
 # ---------------------------------------------------------------------------
 # Env-build helper (loads the project's YAML configs, then calls build_env)
 # ---------------------------------------------------------------------------
 
-def _build_env(sim: str, n_obs: int, n_envs: int):
+def _build_env(sim: str, n_obs: int, n_envs: int,
+               stackable: bool = False, n_z_levels: int = 1,
+               bin_size: float | None = None):
     """Build a BinEnv by loading the project's Hydra YAML config files."""
     from omegaconf import OmegaConf
     from simulators import build_env
@@ -70,12 +72,18 @@ def _build_env(sim: str, n_obs: int, n_envs: int):
     sim_cfg = OmegaConf.load(os.path.join(conf_dir, 'simulator', f'{sim}.yaml'))
     rew_cfg = OmegaConf.load(os.path.join(conf_dir, 'reward', 'default.yaml'))
 
-    cfg = OmegaConf.merge(base, {
+    overrides = {
         'simulator':   sim_cfg,
         'reward':      rew_cfg,
         'n_obstacles': n_obs,
+        'stackable':   stackable,
+        'n_z_levels':  n_z_levels,
         'seed':        None,
-    })
+    }
+    if bin_size is not None:
+        overrides['bin_size'] = bin_size
+
+    cfg = OmegaConf.merge(base, overrides)
     # Remove the 'defaults' key that Hydra uses at compose-time but
     # build_env doesn't need.
     OmegaConf.set_struct(cfg, False)
@@ -124,7 +132,7 @@ def collect_data(env, cfg: CollectConfig) -> list[dict]:
     all_records: list[dict] = []
     rng = random.Random(cfg.seed)
 
-    for _ in tqdm(range(cfg.n_scenes), desc='[MORE] Collecting data'):
+    for scene_idx in tqdm(range(cfg.n_scenes), desc='[MORE] Collecting data'):
         seed = rng.randint(0, 2**31 - 1)
         state = env.reset(seed=seed)
 
@@ -165,9 +173,11 @@ class TrainConfig:
     log_every:     int   = 10
     seed:          int   = 0
     # PPN architecture
-    obj_emb_dim:   int   = 64
-    push_emb_dim:  int   = 64
-    agg_hidden:    int   = 128
+    arch:          str   = 'deepsets'   # 'deepsets' or 'mlp'
+    obj_emb_dim:   int   = 64           # deepsets only
+    push_emb_dim:  int   = 64           # deepsets only
+    agg_hidden:    int   = 128          # deepsets only
+    hidden:        int   = 128          # mlp only
 
 
 def _records_to_tensors(records: list[dict], n_obstacles: int):
@@ -252,10 +262,13 @@ def train_ppn(records: list[dict], n_obstacles: int,
     q_targets_dev = q_targets.to(device)
     weights_dev   = weights.to(device)
 
-    net = PPN(n_obstacles=n_obstacles,
-              obj_emb_dim=cfg.obj_emb_dim,
-              push_emb_dim=cfg.push_emb_dim,
-              agg_hidden=cfg.agg_hidden).to(device)
+    if cfg.arch == 'deepsets':
+        arch_kwargs = dict(obj_emb_dim=cfg.obj_emb_dim,
+                           push_emb_dim=cfg.push_emb_dim,
+                           agg_hidden=cfg.agg_hidden)
+    else:
+        arch_kwargs = dict(hidden=cfg.hidden)
+    net = build_ppn(cfg.arch, n_obstacles=n_obstacles, **arch_kwargs).to(device)
 
     optimizer = torch.optim.Adam(net.parameters(), lr=cfg.lr,
                                  weight_decay=cfg.weight_decay)
@@ -296,14 +309,19 @@ def train_ppn(records: list[dict], n_obstacles: int,
 # Checkpoint helpers
 # ---------------------------------------------------------------------------
 
-def save_ppn(net: PPN, path: str, cfg: TrainConfig, n_obstacles: int):
-    torch.save({
-        'ppn':          net.state_dict(),
-        'n_obstacles':  n_obstacles,
-        'obj_emb_dim':  cfg.obj_emb_dim,
-        'push_emb_dim': cfg.push_emb_dim,
-        'agg_hidden':   cfg.agg_hidden,
-    }, path)
+def save_ppn(net, path: str, cfg: TrainConfig, n_obstacles: int):
+    ckpt = {
+        'ppn':         net.state_dict(),
+        'n_obstacles': n_obstacles,
+        'arch':        cfg.arch,
+    }
+    if cfg.arch == 'deepsets':
+        ckpt.update(obj_emb_dim=cfg.obj_emb_dim,
+                    push_emb_dim=cfg.push_emb_dim,
+                    agg_hidden=cfg.agg_hidden)
+    else:
+        ckpt['hidden'] = cfg.hidden
+    torch.save(ckpt, path)
     print(f'[MORE] PPN saved → {path}')
 
 
@@ -328,8 +346,15 @@ def _parse_args():
                    default='both')
     p.add_argument('--sim',      default='isaaclab',
                    help='Simulator backend (isaaclab | genesis)')
-    p.add_argument('--n_obs',    type=int, default=2)
-    p.add_argument('--n_envs',   type=int, default=8)
+    p.add_argument('--n_obs',      type=int, default=2)
+    p.add_argument('--n_envs',     type=int, default=8)
+    p.add_argument('--stackable',  action='store_true',
+                   help='Enable stackable objects (match alphazero_train.yaml)')
+    p.add_argument('--n_z_levels', type=int, default=1,
+                   help='Number of push height levels (match alphazero_train.yaml)')
+    p.add_argument('--bin_size',   type=float, default=None,
+                   help='Fixed bin side length in metres; null = auto-scale with n_obs. '
+                        'Use 0.4 to keep the N=7 bin size regardless of n_obs.')
     p.add_argument('--data',     default='more_data.pt',
                    help='Input (train) or output (collect) data file')
     p.add_argument('--output',   default='ppn.pt')
@@ -346,6 +371,8 @@ def _parse_args():
     p.add_argument('--epochs',     type=int,   default=100)
     p.add_argument('--batch_size', type=int,   default=256)
     p.add_argument('--lr',         type=float, default=1e-3)
+    p.add_argument('--arch',       default='deepsets', choices=['deepsets', 'mlp'],
+                   help='PPN architecture: deepsets (default) or mlp (AlphaZero-style flat MLP)')
     p.add_argument('--device',     default='cuda' if torch.cuda.is_available() else 'cpu')
     return p.parse_args()
 
@@ -358,7 +385,9 @@ def main():
     if args.phase in ('collect', 'both'):
         if args.sim == 'isaaclab':
             os.environ.setdefault('ISAACLAB_HEADLESS', '1')
-        env = _build_env(args.sim, n_obs=args.n_obs, n_envs=args.n_envs)
+        env = _build_env(args.sim, n_obs=args.n_obs, n_envs=args.n_envs,
+                         stackable=args.stackable, n_z_levels=args.n_z_levels,
+                         bin_size=args.bin_size)
         cfg_c = CollectConfig(
             n_scenes=args.n_scenes,
             n_simulations=args.n_simulations,
@@ -383,6 +412,7 @@ def main():
             batch_size=args.batch_size,
             lr=args.lr,
             seed=args.seed,
+            arch=args.arch,
         )
         net = train_ppn(records, args.n_obs, cfg_t, device=args.device)
         save_ppn(net, args.output, cfg_t, args.n_obs)

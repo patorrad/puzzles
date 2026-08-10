@@ -4,15 +4,15 @@ defaults:
   - _self_
 
 # Environment knobs (passed to build_env)
-n_obstacles: 7
-bin_size: null
+n_obstacles: 20
+bin_size: 0.4
 bin_size_factor: 1
-stackable: false
+stackable: true
 difficult_spawn: false
 friction: 1.0
 obj_size: 0.05
 obstacle_shapes: null  # null=all cubes; list e.g. [L,T,S,Z,I,O,J,cube]; available: cube I O T S Z L J
-n_z_levels: 1
+n_z_levels: 2
 target_z_level: null
 force_obstacle_on_target: false
 push_steps: 256
@@ -26,14 +26,14 @@ viewer: headless
 # Training
 net_arch: mlp   # 'mlp' | 'resnet' | 'transformer' (transformer is solver-only; stacker falls back to resnet)
 n_iterations: 100
-episodes_per_iter: 32
-train_steps_per_iter: 100
+episodes_per_iter: 64 #32
+train_steps_per_iter: 200 #100
 batch_size: 128
 buffer_size: 50000
 lr: 1.0e-3
 weight_decay: 1.0e-4
 checkpoint_every: 25
-output_dir: outputs/alphazero
+output_dir: outputs/alphazero_n20_bin04_stacked
 device: cpu
 use_wandb: true
 log_video: true   # capture a self-play replay video at every checkpoint and upload to wandb (isaaclab only)
@@ -45,7 +45,7 @@ random_stacker: false   # if true, skip adversarial StackerNet and use env.reset
 resume_from: null       # path to a .pt checkpoint to resume from (e.g. outputs/alphazero/alphazero_latest.pt)
 
 selfplay:
-  n_simulations_solver: 100
+  n_simulations_solver: 200
   n_simulations_stacker: 100
   max_depth: 10
   temperature_init: 1.0

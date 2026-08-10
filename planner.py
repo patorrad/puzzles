@@ -628,6 +628,7 @@ class MCTSPusher(_PlannerBase):
         self.action_weights = torch.tensor(action_weights) if action_weights is not None else None
         self.root: MCTSNode | None = None    # populated after plan()
         self.best_leaf: MCTSNode | None = None
+        self.node_expansions: int = 0        # total (state,action) pairs expanded across all _expand calls
 
     def plan(self, initial_state: dict | None = None,
              verbose: bool = True,
@@ -636,6 +637,7 @@ class MCTSPusher(_PlannerBase):
         if initial_state is None:
             initial_state = self.env.get_state(0)
 
+        self.node_expansions = 0
         root = MCTSNode(state=copy.deepcopy(initial_state), depth=0)
         best_leaf: MCTSNode | None = None
         best_reward = self.env._compute_reward(initial_state)
@@ -763,6 +765,7 @@ class MCTSPusher(_PlannerBase):
             node_for_pair.append(node)
 
         if pairs:
+            self.node_expansions += len(pairs)
             results = self.env.batch_evaluate(pairs)
             for parent_node, (_, action), (new_state, reward, done) in \
                     zip(node_for_pair, pairs, results):

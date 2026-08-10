@@ -75,6 +75,44 @@ class AggregateStats:
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _compute_push_distance(plan: list[dict], env) -> float:
+    """Sum of pusher stroke lengths (metres) across all actions in the plan."""
+    total = 0.0
+    for action in plan:
+        _, start, end = env._action_to_stroke(action)
+        dx = end[0] - start[0]
+        dy = end[1] - start[1]
+        total += (dx * dx + dy * dy) ** 0.5
+    return total
+
+
+def _compute_object_metrics(initial_state: dict, final_state: dict, env,
+                             moved_threshold: float = 0.01):
+    """Return (total_displacement, n_moved, n_out_of_bin).
+
+    Displacement is summed over all obstacles (XY plane only).
+    `moved_threshold` is in metres (default 1 cm).
+    """
+    n = env.n_obstacles
+    init_pos  = initial_state['obstacle_pos']   # (N, ≥2)
+    final_pos = final_state['obstacle_pos']
+
+    total_disp = 0.0
+    n_moved    = 0
+    n_out      = 0
+    for i in range(n):
+        dx = float(final_pos[i, 0]) - float(init_pos[i, 0])
+        dy = float(final_pos[i, 1]) - float(init_pos[i, 1])
+        d  = (dx * dx + dy * dy) ** 0.5
+        total_disp += d
+        if d > moved_threshold:
+            n_moved += 1
+        fx, fy = float(final_pos[i, 0]), float(final_pos[i, 1])
+        if fx < 0 or fx > env.bin_w or fy < 0 or fy > env.bin_d:
+            n_out += 1
+    return total_disp, n_moved, n_out
+
+
 def _render_state_image(state: dict, env) -> 'wandb.Image':
     from visualization import render_scenario
     fig = render_scenario(state, env.bin_w, env.bin_d, env._OBJ_SIZE, env.wall_thickness)
@@ -341,6 +379,72 @@ def main(cfg: DictConfig) -> None:
                 print(f'  Logged video to wandb: {result.video_path}')
             except Exception as e:
                 print(f'  [benchmark] wandb video log failed: {e}')
+        # ---------------------------------------------------------------
+        # SQLite results database
+        # ---------------------------------------------------------------
+        if cfg.get('db_path', None):
+            import results_db
+            from alphazero.grid import build_grid_spec
+            from planner import MCTSPusher
+
+            spec = build_grid_spec(env)
+
+            # failure reason
+            if not result.success:
+                failure_reason = 'planning_failed'
+            elif plan is not None and not replay_success:
+                failure_reason = 'replay_failed'
+            else:
+                failure_reason = None
+
+            # plan cost metrics (only if we have a plan and a final state)
+            push_dist   = None
+            obj_disp    = None
+            n_moved     = None
+            n_out       = None
+            if plan and final_state is not None:
+                push_dist = _compute_push_distance(plan, env)
+                obj_disp, n_moved, n_out = _compute_object_metrics(
+                    initial_state, final_state, env)
+
+            # per-planner counters
+            node_exp = getattr(planner, 'node_expansions', None)
+            net_fwd  = getattr(planner, 'network_forward_passes', None)
+            budget   = getattr(cfg.planner, 'n_simulations', None)
+
+            run_data = {
+                'method':                   cfg.planner.name,
+                'n_objects':                cfg.n_obstacles,
+                'stackable':                int(cfg.get('stackable', False)),
+                'bin_size':                 float(env.bin_w),
+                'grid_gx':                  spec.Gx,
+                'grid_gy':                  spec.Gy,
+                'grid_z':                   spec.Z,
+                'scene_id':                 seed,
+                'planning_seed':            seed,
+                'planning_success':         int(result.success),
+                'execution_success':        int(replay_success) if replay_success is not None else None,
+                'failure_reason':           failure_reason,
+                'wall_clock_s':             result.plan_time_s,
+                'node_expansions':          node_exp,
+                'simulator_calls':          result.total_pairs,
+                'network_forward_passes':   net_fwd,
+                'budget_cap':               budget,
+                'n_actions':                result.plan_length,
+                'plan_horizon_pre_filter':  result.plan_length,
+                'plan_horizon_post_filter': result.plan_length,
+                'total_push_distance':      push_dist,
+                'total_object_displacement': obj_disp,
+                'n_objects_moved':          n_moved,
+                'objects_displaced_from_bin': n_out,
+                'final_reward':             result.final_reward,
+                'verify_successes':         verify_successes if plan is not None else None,
+                'verify_rate':              verify_rate if plan is not None else None,
+                'wandb_run_id':             wandb.run.id if wandb.run else None,
+            }
+            row_id = results_db.log_run(cfg.db_path, run_data)
+            print(f'  [db] Run logged → {cfg.db_path} (row {row_id})')
+
         results.append(result)
 
     # Aggregate stats
