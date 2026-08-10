@@ -63,6 +63,18 @@ class EpisodeResult:
     plan_time_s:     float
     batch_calls:     int
     total_pairs:     int
+    # compute budget
+    simulator_calls:          int   = 0     # alias for total_pairs; matches paper schema
+    network_forward_passes:   int | None = None
+    budget_cap:               int | None = None
+    # plan structure
+    plan_horizon_pre_filter:  int = 0      # plan length before verify filter
+    plan_horizon_post_filter: int = 0      # plan length after verify accepted (same unless filtered)
+    # plan cost
+    total_push_distance:        float | None = None
+    total_object_displacement:  float | None = None
+    n_objects_moved:            int   | None = None
+    objects_displaced_from_bin: int   | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +102,51 @@ def _run_episode(env, planner, initial_state: dict, seed: int,
 
 
 # ---------------------------------------------------------------------------
+# Plan cost helpers
+# ---------------------------------------------------------------------------
+
+def _get_plan_final_state(env, plan: list[dict], initial_state: dict) -> dict:
+    """Execute plan sequentially via batch_evaluate; return the final state."""
+    state = initial_state
+    for action in plan:
+        (state, _, _), = env.batch_evaluate([(state, action)])
+    return state
+
+
+def _compute_push_distance(plan: list[dict], env) -> float:
+    """Sum of pusher stroke lengths (metres) across all actions."""
+    total = 0.0
+    for action in plan:
+        _, start, end = env._action_to_stroke(action)
+        dx, dy = end[0] - start[0], end[1] - start[1]
+        total += (dx * dx + dy * dy) ** 0.5
+    return total
+
+
+def _compute_object_metrics(initial_state: dict, final_state: dict, env,
+                             moved_threshold: float = 0.01):
+    """Return (total_displacement, n_moved, n_out_of_bin).
+
+    Displacement is XY only.  `moved_threshold` is in metres (default 1 cm).
+    """
+    n = env.n_obstacles
+    ip = initial_state['obstacle_pos']
+    fp = final_state['obstacle_pos']
+    total, n_moved, n_out = 0.0, 0, 0
+    for i in range(n):
+        dx = float(fp[i, 0]) - float(ip[i, 0])
+        dy = float(fp[i, 1]) - float(ip[i, 1])
+        d  = (dx * dx + dy * dy) ** 0.5
+        total += d
+        if d > moved_threshold:
+            n_moved += 1
+        fx, fy = float(fp[i, 0]), float(fp[i, 1])
+        if fx < 0 or fx > env.bin_w or fy < 0 or fy > env.bin_d:
+            n_out += 1
+    return total, n_moved, n_out
+
+
+# ---------------------------------------------------------------------------
 # Aggregate statistics over a list of EpisodeResults
 # ---------------------------------------------------------------------------
 
@@ -110,18 +167,42 @@ def _aggregate(results: list[EpisodeResult]) -> dict:
     tp_m, tp_s   = _s([r.total_pairs  for r in results])
     pt_m, pt_s   = _s([r.plan_time_s  for r in results])
 
+    push_vals = [r.total_push_distance for r in successes if r.total_push_distance is not None]
+    disp_vals = [r.total_object_displacement for r in successes if r.total_object_displacement is not None]
+    mov_vals  = [r.n_objects_moved for r in successes if r.n_objects_moved is not None]
+    out_vals  = [r.objects_displaced_from_bin for r in successes if r.objects_displaced_from_bin is not None]
+    nfp_vals  = [r.network_forward_passes for r in results if r.network_forward_passes is not None]
+
+    pd_m, pd_s = _s(push_vals) if push_vals else (float('nan'), float('nan'))
+    od_m, od_s = _s(disp_vals) if disp_vals else (float('nan'), float('nan'))
+    mv_m, _    = _s(mov_vals)  if mov_vals  else (float('nan'), float('nan'))
+    ot_m, _    = _s(out_vals)  if out_vals  else (float('nan'), float('nan'))
+    nf_m, _    = _s(nfp_vals)  if nfp_vals  else (float('nan'), float('nan'))
+
+    budget_cap = results[0].budget_cap
+
+    def _fmt(v): return f'{v:.2f}' if v == v else 'N/A'   # nan check
+
     return {
-        'planner':          results[0].planner,
-        'n_runs':           n,
-        'success_rate':     f'{success_rate:.1%}',
-        'plan_len_mean':    f'{pl_m:.1f}',
-        'plan_len_std':     f'{pl_s:.1f}',
-        'time_mean_s':      f'{pt_m:.1f}',
-        'time_std_s':       f'{pt_s:.1f}',
-        'batch_calls_mean': f'{bc_m:.0f}',
-        'batch_calls_std':  f'{bc_s:.0f}',
-        'total_pairs_mean': f'{tp_m:.0f}',
-        'total_pairs_std':  f'{tp_s:.0f}',
+        'planner':              results[0].planner,
+        'n_runs':               n,
+        'success_rate':         f'{success_rate:.1%}',
+        'plan_len_mean':        f'{pl_m:.1f}',
+        'plan_len_std':         f'{pl_s:.1f}',
+        'time_mean_s':          f'{pt_m:.1f}',
+        'time_std_s':           f'{pt_s:.1f}',
+        'batch_calls_mean':     f'{bc_m:.0f}',
+        'batch_calls_std':      f'{bc_s:.0f}',
+        'total_pairs_mean':     f'{tp_m:.0f}',
+        'total_pairs_std':      f'{tp_s:.0f}',
+        'budget_cap':           str(budget_cap) if budget_cap is not None else 'N/A',
+        'net_fwd_passes_mean':  _fmt(nf_m),
+        'push_dist_mean_m':     _fmt(pd_m),
+        'push_dist_std_m':      _fmt(pd_s),
+        'obj_disp_mean_m':      _fmt(od_m),
+        'obj_disp_std_m':       _fmt(od_s),
+        'n_moved_mean':         _fmt(mv_m),
+        'n_out_of_bin_mean':    _fmt(ot_m),
     }
 
 
@@ -378,12 +459,40 @@ def main():
         for planner, name in planners:
             res, plan = _run_episode(
                 env, planner, state_copy, seed, name, verbose=args.verbose)
+
+            # ---- budget metadata ----
+            res.simulator_calls        = res.total_pairs
+            res.network_forward_passes = getattr(planner, 'network_forward_passes', None)
+            if name == 'AlphaZero':
+                res.budget_cap = args.az_n_sim
+            elif name == 'MORE':
+                res.budget_cap = args.more_n_sim
+            elif name == 'VanillaMCTS':
+                res.budget_cap = args.mcts_n_sim
+
+            # ---- plan structure ----
+            res.plan_horizon_pre_filter  = res.plan_length
+            res.plan_horizon_post_filter = res.plan_length
+
+            # ---- plan cost (requires executing the plan once more) ----
+            if plan is not None:
+                res.total_push_distance = _compute_push_distance(plan, env)
+                try:
+                    final_state = _get_plan_final_state(env, plan, copy.deepcopy(state_copy))
+                    disp, n_moved, n_out = _compute_object_metrics(state_copy, final_state, env)
+                    res.total_object_displacement  = disp
+                    res.n_objects_moved            = n_moved
+                    res.objects_displaced_from_bin = n_out
+                except Exception as e:
+                    print(f'  [eval] plan replay for metrics failed ({name}): {e}')
+
             status = 'OK ' if res.success else 'FAIL'
             print(f'  {name:12s} [{status}] '
                   f'plan_len={res.plan_length:3d}  '
                   f'time={res.plan_time_s:6.1f}s  '
                   f'batch_calls={res.batch_calls:6d}  '
-                  f'total_pairs={res.total_pairs:7d}')
+                  f'total_pairs={res.total_pairs:7d}'
+                  + (f'  push_dist={res.total_push_distance:.3f}m' if res.total_push_distance is not None else ''))
             all_results.append(res)
             plans[name] = plan
 
@@ -392,6 +501,10 @@ def main():
             run_log[f'{name}/plan_time_s'] = res.plan_time_s
             run_log[f'{name}/batch_calls'] = res.batch_calls
             run_log[f'{name}/total_pairs'] = res.total_pairs
+            if res.total_push_distance is not None:
+                run_log[f'{name}/push_dist']  = res.total_push_distance
+            if res.total_object_displacement is not None:
+                run_log[f'{name}/obj_disp']   = res.total_object_displacement
 
         # Record videos before logging so they go in the same wandb step
         if args.log_video:
