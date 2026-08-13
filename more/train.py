@@ -130,10 +130,21 @@ def collect_data(env, cfg: CollectConfig) -> list[dict]:
     )
 
     all_records: list[dict] = []
+    start_scene = 0
+    if cfg.checkpoint_path and os.path.exists(cfg.checkpoint_path):
+        ckpt = torch.load(cfg.checkpoint_path, weights_only=False)
+        if isinstance(ckpt, dict) and 'scenes_completed' in ckpt:
+            all_records = ckpt['records']
+            start_scene = ckpt['scenes_completed']
+            print(f'[MORE] Resuming from checkpoint: {start_scene}/{cfg.n_scenes} scenes already done, '
+                  f'{len(all_records)} transitions loaded.')
+
     rng = random.Random(cfg.seed)
 
     for scene_idx in tqdm(range(cfg.n_scenes), desc='[MORE] Collecting data'):
         seed = rng.randint(0, 2**31 - 1)
+        if scene_idx < start_scene:
+            continue  # already completed in a prior run; seed still drawn so the sequence matches
         state = env.reset(seed=seed)
 
         # Build tree from root, collect transitions
@@ -151,6 +162,10 @@ def collect_data(env, cfg: CollectConfig) -> list[dict]:
 
         records = tree.collect_transitions(root)
         all_records.extend(records)
+
+        if cfg.checkpoint_path:
+            torch.save({'records': all_records, 'scenes_completed': scene_idx + 1}, cfg.checkpoint_path)
+            print(f'[MORE] Checkpoint: {len(all_records)} transitions after scene {scene_idx+1}/{cfg.n_scenes}')
 
         if cfg.checkpoint_path:
             torch.save(all_records, cfg.checkpoint_path)
