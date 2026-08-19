@@ -253,7 +253,7 @@ def _plan_scenario(env, cfg: DictConfig, scenario_idx: int, scenario_name: str,
     if not success:
         return result, None
 
-    verify_successes, _, verify_rate, verify_passed = planner.verify(plan, initial_state)
+    verify_successes, _, verify_rate, verify_passed, _ = planner.verify(plan, initial_state)
     result.verify_rate = verify_rate
     print(f'  Verify: {verify_successes}/{env.n_envs} ({verify_rate:.0%}) — '
           f'{"PASS" if verify_passed else "FAIL"}')

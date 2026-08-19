@@ -117,8 +117,8 @@ class AlphaZeroPusher:
         # Verify against multiple envs (same as MCTSPusher does for goal nodes)
         from planner import _verify_plan  # reuse existing verifier
         with self.env.push_steps_ctx(self.verify_push_steps) if hasattr(self.env, 'push_steps_ctx') else _NullCtx():
-            n_tries = max(self.min_verify_envs, self.batch_size)
-            successes, avg_reward = _verify_plan(
+            n_tries = self.min_verify_envs
+            successes, avg_reward, goal_flags = _verify_plan(
                 self.env, plan, copy.deepcopy(initial_state), n_tries,
                 verbose=verbose, pause=pause_before_verify)
 
@@ -129,17 +129,17 @@ class AlphaZeroPusher:
 
         if verbose:
             print(f'  AlphaZero: plan verified ({successes}/{n_tries}, avg_reward={avg_reward:.3f}).')
-        self._last_verify = (successes, avg_reward, n_tries)
+        self._last_verify = (successes, avg_reward, n_tries, goal_flags)
         return plan
 
     def verify(self, plan: list[dict], initial_state: dict,
-               verbose: bool = True) -> tuple[int, float, float, bool]:
+               verbose: bool = True) -> tuple[int, float, float, bool, list]:
         # Return the cached result from plan()'s internal verification rather
         # than re-running a second stochastic pass whose results could diverge.
-        successes, avg_reward, n_tries = self._last_verify
+        successes, avg_reward, n_tries, goal_flags = self._last_verify
         rate = successes / n_tries
         passed = rate >= self.verify_threshold
-        return successes, avg_reward, rate, passed
+        return successes, avg_reward, rate, passed, goal_flags
 
 
 class _NullCtx:

@@ -16,6 +16,7 @@ python benchmark.py --config-name=benchmark simulator=isaaclab record_video=true
 python benchmark.py --config-name=benchmark wandb_project=my-project wandb_entity=myname
 """
 
+import csv
 import os
 import time
 from dataclasses import dataclass, asdict
@@ -248,12 +249,13 @@ def main(cfg: DictConfig) -> None:
 
     record_video = cfg.record_video and cfg.simulator.name == 'isaaclab'
     if record_video:
-        video_dir = os.path.join(cfg.video_dir, wandb.run.id)
+        video_dir = os.path.join(cfg.video_dir, wandb.run.name)
         os.makedirs(video_dir, exist_ok=True)
     else:
         video_dir = cfg.video_dir
 
     results: list[RunResult] = []
+    csv_rows: list[dict] = []
     best_reward: float | None = None
 
     for i in range(cfg.n_runs):
@@ -264,12 +266,23 @@ def main(cfg: DictConfig) -> None:
         result, plan, initial_state, planner = _run_once(env, cfg, i, seed, initial_state=initial_state)
         verify_successes = 0
         verify_rate = 0.0
+        verify_std = None
+        verify_flags: list = []
         final_state = None
 
         if plan is not None:
-            verify_successes, _, verify_rate, verify_passed = planner.verify(plan, initial_state)
+            verify_successes, _, verify_rate, verify_passed, verify_flags = planner.verify(plan, initial_state)
+            verify_std = float(np.std(verify_flags)) if verify_flags else None
             print(f'  Benchmark verify: {verify_successes}/{env.n_envs} '
                   f'({verify_rate:.0%}) — {"PASS" if verify_passed else "FAIL"}')
+
+            if cfg.get('solutions_dir', None):
+                from main import save_solution
+                os.makedirs(cfg.solutions_dir, exist_ok=True)
+                sol_path = os.path.join(cfg.solutions_dir,
+                                        f'run_{i:03d}_seed_{seed}.json')
+                save_solution(sol_path, plan, initial_state, cfg, env)
+                print(f'  Solution saved → {sol_path}')
 
             if record_video:
                 suffix = 'pass' if verify_passed else 'verify_fail'
@@ -447,6 +460,35 @@ def main(cfg: DictConfig) -> None:
 
         results.append(result)
 
+        if cfg.get('csv_path', None):
+            _push_dist = _obj_disp = _n_moved = _n_out = None
+            if plan is not None and final_state is not None:
+                _push_dist = _compute_push_distance(plan, env)
+                _obj_disp, _n_moved, _n_out = _compute_object_metrics(
+                    initial_state, final_state, env)
+            csv_rows.append({
+                'seed':                       seed,
+                'planner':                    cfg.planner.name,
+                'wandb_run_name':             wandb.run.name if wandb.run else None,
+                'success':                    int(result.success),
+                'plan_length':                result.plan_length,
+                'plan_time_s':                result.plan_time_s,
+                'batch_calls':                result.batch_calls,
+                'total_pairs':                result.total_pairs,
+                'simulator_calls':            result.total_pairs,
+                'network_forward_passes':     getattr(planner, 'network_forward_passes', None),
+                'budget_cap':                 getattr(cfg.planner, 'n_simulations', None),
+                'plan_horizon_pre_filter':    result.plan_length,
+                'plan_horizon_post_filter':   result.plan_length,
+                'total_push_distance':        _push_dist,
+                'total_object_displacement':  _obj_disp,
+                'n_objects_moved':            _n_moved,
+                'objects_displaced_from_bin': _n_out,
+                'verify_successes':           verify_successes if plan is not None else None,
+                'verify_rate':                verify_rate if plan is not None else None,
+                'verify_std':                 verify_std,
+            })
+
     # Aggregate stats
     agg = _aggregate(results)
 
@@ -465,6 +507,18 @@ def main(cfg: DictConfig) -> None:
 
     for key, val in asdict(agg).items():
         wandb.run.summary[key] = val
+
+    if csv_rows and cfg.get('csv_path', None):
+        csv_path = cfg.csv_path
+        write_header = not os.path.exists(csv_path)
+        with open(csv_path, 'a', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=list(csv_rows[0].keys()),
+                                    extrasaction='ignore')
+            if write_header:
+                writer.writeheader()
+            writer.writerows(csv_rows)
+        print(f'[benchmark] CSV written → {csv_path} ({len(csv_rows)} rows, '
+              f'{"new file" if write_header else "appended"})')
 
     wandb.finish()
 

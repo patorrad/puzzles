@@ -3,7 +3,7 @@ defaults:
   - override simulator: isaaclab
   - _self_
 # Environment
-n_obstacles: 20
+n_obstacles: 10
 parallel_envs: 16
 difficult_spawn: true
 
@@ -23,6 +23,12 @@ video_dir: "benchmark_videos"
 
 # Results database (SQLite)
 db_path: null             # set to a path like "results/paper.db" to enable logging
+
+# CSV output (matches eval_comparison.py EpisodeResult schema; appends if file exists)
+csv_path: null            # set to a path like "results/benchmark.csv" to enable
+
+# Solution saving (for robotic execution)
+solutions_dir: null       # set to a directory path to save per-episode solution JSONs
 
 # WandB
 wandb_project: "bin-clearing-benchmark"

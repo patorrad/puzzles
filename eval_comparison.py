@@ -78,6 +78,7 @@ class EpisodeResult:
     # verification (same logic as benchmark.py)
     verify_successes:           int   | None = None
     verify_rate:                float | None = None
+    verify_std:                 float | None = None  # std of per-env binary outcomes
 
 
 # ---------------------------------------------------------------------------
@@ -278,7 +279,7 @@ def _build_more_planner(env, args):
         gamma=args.more_gamma,
         k_per_object=args.more_k,
         seed=args.seed,
-        verify_threshold=0.0,   # contour pushes are stochastic; trust direct execution
+        verify_threshold=args.verify_threshold,   # contour pushes are stochastic; trust direct execution
         min_verify_envs=args.n_envs,
     )
 
@@ -312,6 +313,8 @@ def _parse_args():
     p.add_argument('--n_obs',      type=int,   default=2)
     p.add_argument('--n_envs',     type=int,   default=16,
                    help='Parallel envs (for verification)')
+    p.add_argument('--difficult_spawn', action='store_true',
+                   help='Use difficult initial spawn positions (must match training config)')
     p.add_argument('--stackable',  action='store_true',
                    help='Enable stackable objects (must match training config)')
     p.add_argument('--n_z_levels', type=int,   default=1,
@@ -355,6 +358,7 @@ def _parse_args():
     p.add_argument('--wandb',            action='store_true')
     p.add_argument('--wandb_project',    default='puzzle-comparison')
     p.add_argument('--wandb_entity',     default=None)
+    p.add_argument('--wandb_run_name',   default=None)
     p.add_argument('--log_video',        action='store_true',
                    help='Record and upload a replay video for every episode')
     p.add_argument('--video_dir',        default='eval_videos',
@@ -364,7 +368,7 @@ def _parse_args():
 
 def _build_env(sim: str, n_obs: int, n_envs: int,
                stackable: bool = False, n_z_levels: int = 1,
-               bin_size: float | None = None):
+               bin_size: float | None = None, difficult_spawn: bool = False):
     """Build a BinEnv by loading the project's Hydra YAML config files."""
     from simulators import build_env
 
@@ -374,12 +378,13 @@ def _build_env(sim: str, n_obs: int, n_envs: int,
     rew_cfg = OmegaConf.load(os.path.join(conf_dir, 'reward', 'default.yaml'))
 
     overrides = {
-        'simulator':   sim_cfg,
-        'reward':      rew_cfg,
-        'n_obstacles': n_obs,
-        'stackable':   stackable,
-        'n_z_levels':  n_z_levels,
-        'seed':        None,
+        'simulator':    sim_cfg,
+        'reward':       rew_cfg,
+        'n_obstacles':  n_obs,
+        'stackable':    stackable,
+        'n_z_levels':   n_z_levels,
+        'difficult_spawn': difficult_spawn,
+        'seed':         None,
     }
     if bin_size is not None:
         overrides['bin_size'] = bin_size
@@ -415,6 +420,7 @@ def main():
             wb = _wb
             wb.init(project=args.wandb_project,
                     entity=args.wandb_entity or None,
+                    name=args.wandb_run_name or None,
                     config=vars(args))
             print(f'[eval] wandb run: {wb.run.url}')
         except Exception as e:
@@ -432,7 +438,7 @@ def main():
           f'n_z_levels={args.n_z_levels}, bin_size={args.bin_size}')
     env = _build_env(args.sim, n_obs=args.n_obs, n_envs=args.n_envs,
                      stackable=args.stackable, n_z_levels=args.n_z_levels,
-                     bin_size=args.bin_size)
+                     bin_size=args.bin_size, difficult_spawn=args.difficult_spawn)
 
     # ---------- planners ----------
     print(f'[eval] Building AlphaZero planner (checkpoint={args.az_checkpoint})')
@@ -494,10 +500,11 @@ def main():
 
             # ---- verification (same logic as benchmark.py) ----
             if plan is not None:
-                v_succ, _, v_rate, _ = planner.verify(plan, state_copy, verbose=False)
+                v_succ, _, v_rate, _, v_flags = planner.verify(plan, state_copy, verbose=False)
                 res.verify_successes = v_succ
                 res.verify_rate      = v_rate
-                print(f'  {name:12s} verify: {v_succ}/{env.n_envs} ({v_rate:.0%})')
+                res.verify_std       = float(np.std(v_flags)) if v_flags else None
+                print(f'  {name:12s} verify: {v_succ}/{env.n_envs} ({v_rate:.0%}) std={res.verify_std:.3f}')
 
             status = 'OK ' if res.success else 'FAIL'
             print(f'  {name:12s} [{status}] '

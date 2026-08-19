@@ -184,8 +184,8 @@ class MOREPlanner:
         ctx = (self.env.push_steps_ctx(self.verify_push_steps)
                if hasattr(self.env, 'push_steps_ctx') else _NullCtx())
         with ctx:
-            n_tries = max(self.min_verify_envs, self.batch_size)
-            successes, avg_reward = _verify_plan(
+            n_tries = self.min_verify_envs
+            successes, avg_reward, _ = _verify_plan(
                 self.env, plan, copy.deepcopy(initial_state),
                 n_tries, verbose=verbose, pause=pause_before_verify)
 
@@ -203,16 +203,16 @@ class MOREPlanner:
         return plan
 
     def verify(self, plan: list[dict], initial_state: dict,
-               verbose: bool = True) -> tuple[int, float, float, bool]:
+               verbose: bool = True) -> tuple[int, float, float, bool, list]:
         ctx = (self.env.push_steps_ctx(self.verify_push_steps)
                if hasattr(self.env, 'push_steps_ctx') else _NullCtx())
         with ctx:
-            n_tries = max(self.min_verify_envs, self.batch_size)
-            successes, avg_reward = _verify_plan(
+            n_tries = self.min_verify_envs
+            successes, avg_reward, goal_flags = _verify_plan(
                 self.env, plan, copy.deepcopy(initial_state),
                 n_tries, verbose=verbose)
         rate = successes / n_tries
-        return successes, avg_reward, rate, rate >= self.verify_threshold
+        return successes, avg_reward, rate, rate >= self.verify_threshold, goal_flags
 
 
 class _NullCtx:

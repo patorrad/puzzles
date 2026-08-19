@@ -1,3 +1,10 @@
+# TODO
+- save_solution was written for AZ/MCTS actions (push_pos, action_type, obj_idx) but MORE uses push_dir with push_start_xy/push_end_xy. I need to make the plan serialization handle both:
+- Also note: _detach_plan at line 127–131 only handles push_pos (AZ/MCTS format), so it will break for MORE plans too. Want me to fix that?
+
+
+
+
 # Puzzle — Bin-Clearing Planning with Genesis
 
 A physics-based planning environment for the bin-clearing task: move a target

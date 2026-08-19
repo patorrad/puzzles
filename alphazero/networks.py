@@ -1,6 +1,6 @@
 """Solver and stacker (policy, value) networks.
 
-Three architectures, selected via the ``net_arch`` config knob (see
+Four architectures, selected via the ``net_arch`` config knob (see
 ``build_solver_net`` / ``build_stacker_net``):
 
   - mlp:         2-layer trunk (~30k params), the original baseline.
@@ -9,6 +9,8 @@ Three architectures, selected via the ``net_arch`` config knob (see
                  continuous xyz poses through an MLP branch.
   - transformer: solver only — each object (target + N obstacles) becomes a
                  token; self-attention captures relational structure.
+  - deepsets:    solver only — permutation-equivariant DeepSets over object
+                 tokens (xyz + quat + is_target); no grid one-hots needed.
 
 All variants share the head contract: forward(x) -> (policy logits, tanh
 value). The policy head outputs raw logits; masking of illegal actions is the
@@ -25,7 +27,7 @@ from .encoders import OBJ_POSE_DIM
 
 
 class _Trunk(nn.Module):
-    def __init__(self, in_dim: int, hidden: int = 512):
+    def __init__(self, in_dim: int, hidden: int = 1024):
         super().__init__()
         self.net = nn.Sequential(
             nn.Linear(in_dim, hidden), nn.ReLU(),
@@ -39,7 +41,7 @@ class _Trunk(nn.Module):
 class SolverNet(nn.Module):
     """Input: flat solver-state vector. Outputs: (policy logits, value)."""
 
-    def __init__(self, in_dim: int, n_actions: int, hidden: int = 128):
+    def __init__(self, in_dim: int, n_actions: int, hidden: int = 1024):
         super().__init__()
         self.in_dim = in_dim
         self.n_actions = n_actions
@@ -226,6 +228,97 @@ class SolverTransformer(nn.Module):
         return logits, value
 
 
+class SolverDeepSets(nn.Module):
+    """DeepSets over object tokens (target + N obstacles).
+
+    Per-object input: xyz(3) + quat(4) + is_target(1) = 8 dims.
+    Grid one-hots are ignored — continuous pose is sufficient and makes
+    the network resolution-independent.
+
+    Policy is permutation-equivariant: each object independently produces
+    4*n_z_levels logits (direction × z-level), then they are transposed to
+    match the standard flat action index layout (action_type-major).
+    Value is permutation-invariant via max+sum pooling.
+    """
+
+    OBJ_DIM = 8  # xyz(3) + quat(4) + is_target(1)
+
+    def __init__(self, n_actions: int, n_obstacles: int,
+                 obj_emb_dim: int = 128, agg_hidden: int = 256):
+        super().__init__()
+        self.n_actions = n_actions
+        self.n_obstacles = n_obstacles
+        self.n_objects = 1 + n_obstacles
+        self.n_z_levels = n_actions // (4 * self.n_objects)
+        self.actions_per_obj = 4 * self.n_z_levels
+
+        # φ: per-object encoder
+        self.phi = nn.Sequential(
+            nn.Linear(self.OBJ_DIM, obj_emb_dim), nn.ReLU(),
+            nn.Linear(obj_emb_dim, obj_emb_dim), nn.ReLU(),
+        )
+
+        # ρ: global aggregation for value and policy context
+        self.rho = nn.Sequential(
+            nn.Linear(2 * obj_emb_dim, agg_hidden), nn.ReLU(),
+        )
+        self.value_head = nn.Linear(agg_hidden, 1)
+
+        # Per-object policy: [obj_emb | global_context] → 4*n_z logits
+        self.policy_head = nn.Linear(obj_emb_dim + agg_hidden, self.actions_per_obj)
+
+    @property
+    def in_dim(self) -> int:
+        return self.OBJ_DIM * self.n_objects
+
+    def _parse(self, x: torch.Tensor) -> torch.Tensor:
+        """Parse flat solver state → (B, N+1, 8) object tokens.
+
+        The flat layout from encode_solver_state is section-contiguous:
+        [target_xyz(3), obstacle_xyz(3N), target_quat(4), obstacle_quat(4N), one_hots...]
+        """
+        unbatched = x.dim() == 1
+        if unbatched:
+            x = x.unsqueeze(0)
+        B = x.shape[0]
+        N = self.n_obstacles
+        n = self.n_objects
+
+        xyz  = x[:, :3 * n].view(B, n, 3)
+        quat = x[:, 3 * n:7 * n].view(B, n, 4)
+
+        is_target = torch.zeros(B, n, 1, device=x.device)
+        is_target[:, 0, :] = 1.0
+
+        tokens = torch.cat([xyz, quat, is_target], dim=-1)  # (B, N+1, 8)
+        return tokens, unbatched
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        tokens, unbatched = self._parse(x)
+        B = tokens.shape[0]
+
+        emb = self.phi(tokens)                        # (B, N+1, obj_emb_dim)
+        agg = torch.cat([emb.max(dim=1).values,
+                         emb.sum(dim=1)], dim=-1)     # (B, 2*obj_emb_dim)
+        ctx = self.rho(agg)                           # (B, agg_hidden)
+
+        # Value
+        value = torch.tanh(self.value_head(ctx)).squeeze(-1)  # (B,)
+
+        # Per-object policy: broadcast context to each object slot
+        ctx_exp = ctx.unsqueeze(1).expand(-1, self.n_objects, -1)  # (B, N+1, agg_hidden)
+        per_obj = self.policy_head(torch.cat([emb, ctx_exp], dim=-1))  # (B, N+1, 4*n_z)
+
+        # Transpose to action_type-major to match standard index layout:
+        # (B, N+1, 4, n_z) → (B, 4, N+1, n_z) → (B, 4*(N+1)*n_z)
+        per_obj = per_obj.view(B, self.n_objects, 4, self.n_z_levels)
+        logits = per_obj.permute(0, 2, 1, 3).reshape(B, self.n_actions)
+
+        if unbatched:
+            return logits.squeeze(0), value.squeeze(0)
+        return logits, value
+
+
 def build_solver_net(arch: str, in_dim: int, n_actions: int,
                      n_obstacles: int, grid_h: int, grid_w: int) -> nn.Module:
     if arch == 'mlp':
@@ -238,7 +331,9 @@ def build_solver_net(arch: str, in_dim: int, n_actions: int,
         return SolverTransformer(in_dim=in_dim, n_actions=n_actions,
                                  n_obstacles=n_obstacles,
                                  grid_h=grid_h, grid_w=grid_w)
-    raise ValueError(f"unknown net_arch '{arch}' (expected mlp | resnet | transformer)")
+    if arch == 'deepsets':
+        return SolverDeepSets(n_actions=n_actions, n_obstacles=n_obstacles)
+    raise ValueError(f"unknown net_arch '{arch}' (expected mlp | resnet | transformer | deepsets)")
 
 
 def build_stacker_net(arch: str, grid_h: int, grid_w: int, n_actions: int,
@@ -246,12 +341,12 @@ def build_stacker_net(arch: str, grid_h: int, grid_w: int, n_actions: int,
     if arch == 'mlp':
         return StackerNet(grid_h=grid_h, grid_w=grid_w, n_actions=n_actions,
                           in_channels=in_channels)
-    if arch in ('resnet', 'transformer'):
+    if arch in ('resnet', 'transformer', 'deepsets'):
         # The stacker state is a grid image with no token decomposition, so
-        # the transformer arch falls back to the CNN here.
+        # transformer and deepsets both fall back to the CNN here.
         return StackerResNet(grid_h=grid_h, grid_w=grid_w, n_actions=n_actions,
                              in_channels=in_channels)
-    raise ValueError(f"unknown net_arch '{arch}' (expected mlp | resnet | transformer)")
+    raise ValueError(f"unknown net_arch '{arch}' (expected mlp | resnet | transformer | deepsets)")
 
 
 def masked_log_softmax(logits: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:

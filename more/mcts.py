@@ -257,7 +257,7 @@ class MORETree:
         scored.sort(key=lambda t: t[0], reverse=True)
 
         pairs = [(node.state, action) for _, action in scored]
-        results = self.env.batch_evaluate(pairs)
+        results = self._chunked_batch_evaluate(pairs)
 
         for (q_est, action), (new_state, reward, done) in zip(scored, results):
             dropped = self.env._obstacles_dropped(new_state)

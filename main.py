@@ -119,6 +119,18 @@ def _simulate_plan_steps(env, plan: list[dict], initial_state: dict) -> list[dic
     return steps
 
 
+def _serialise_action(a: dict) -> dict:
+    """Serialise one plan action to a JSON-safe dict regardless of planner type."""
+    out = {'action_type': a['action_type'], 'obj_idx': int(a['obj_idx']),
+           'push_z': float(a['push_z'])}
+    if 'push_pos' in a:
+        out['push_pos'] = [float(v) for v in a['push_pos']]
+    if 'push_start_xy' in a:
+        out['push_start_xy'] = [float(v) for v in a['push_start_xy']]
+        out['push_end_xy']   = [float(v) for v in a['push_end_xy']]
+    return out
+
+
 def save_solution(path: str, plan: list[dict], initial_state: dict,
                   cfg: DictConfig, env):
     BIN_W    = env.bin_w
@@ -172,11 +184,7 @@ def save_solution(path: str, plan: list[dict], initial_state: dict,
             'obstacle_quat': initial_state['obstacle_quat'].tolist(),
         },
         'actors': actors,
-        'plan': [
-            {'action_type': a['action_type'], 'obj_idx': int(a['obj_idx']),
-             'push_pos': [float(v) for v in a['push_pos']], 'push_z': float(a['push_z'])}
-            for a in plan
-        ],
+        'plan': [_serialise_action(a) for a in plan],
         'steps': _simulate_plan_steps(env, plan, initial_state),
     }
 

@@ -193,7 +193,7 @@ class TrainConfig:
     obj_emb_dim:   int   = 64           # deepsets only
     push_emb_dim:  int   = 64           # deepsets only
     agg_hidden:    int   = 128          # deepsets only
-    hidden:        int   = 128          # mlp only
+    hidden:        int   = 1024          # mlp only
 
 
 def _records_to_tensors(records: list[dict], n_obstacles: int):

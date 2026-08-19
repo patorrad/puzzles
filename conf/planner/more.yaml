@@ -1,9 +1,9 @@
 name: more
 ppn_checkpoint: ppn.pt          # path to trained PPN (.pt)
-n_simulations: 500              # MCTS iterations per planning step
+n_simulations: 50              # MCTS iterations per planning step
 max_depth: 3                    # paper: 3 for guided eval (4 for data collection)
 gamma: 0.5                      # discount factor (paper §III-A)
-k_per_object: 8                 # contour push samples per object per expansion
+k_per_object: 4                 # contour push samples per object per expansion
 rollout_depth: 5                # random rollout steps per simulation
 m: 3                            # top-m rollout rewards summed in Eq.3
 c_uct: 2.0                      # UCT constant (only used if ppn_checkpoint is absent)

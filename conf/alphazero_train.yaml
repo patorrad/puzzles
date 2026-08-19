@@ -4,11 +4,11 @@ defaults:
   - _self_
 
 # Environment knobs (passed to build_env)
-n_obstacles: 20
+n_obstacles: 10
 bin_size: 0.4
 bin_size_factor: 1
 stackable: true
-difficult_spawn: false
+difficult_spawn: true
 friction: 1.0
 obj_size: 0.05
 obstacle_shapes: null  # null=all cubes; list e.g. [L,T,S,Z,I,O,J,cube]; available: cube I O T S Z L J
@@ -24,7 +24,7 @@ debug: false
 viewer: headless
 
 # Training
-net_arch: mlp   # 'mlp' | 'resnet' | 'transformer' (transformer is solver-only; stacker falls back to resnet)
+net_arch: mlp   # 'mlp' | 'resnet' | 'transformer' | 'deepsets' (transformer/deepsets solver-only; stacker falls back to resnet)
 n_iterations: 100
 episodes_per_iter: 32
 train_steps_per_iter: 100
@@ -32,9 +32,9 @@ batch_size: 128
 buffer_size: 50000
 lr: 1.0e-3
 weight_decay: 1.0e-4
-checkpoint_every: 25
-output_dir: outputs/alphazero_n20_bin04_stacked
-device: cpu
+checkpoint_every: 10
+output_dir: outputs/10obs_stacked2_difficult/n_sim_sol200_nn1024_random_stacker_10obs_stacked2_difficult
+device: cuda # For neural network
 use_wandb: true
 log_video: true   # capture a self-play replay video at every checkpoint and upload to wandb (isaaclab only)
 wandb_project: puzzle-alphazero

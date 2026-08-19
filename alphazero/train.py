@@ -31,7 +31,7 @@ from .selfplay import SelfPlayConfig, play_batched_episodes, play_batched_episod
 logger = logging.getLogger(__name__)
 
 
-def _build_networks(env, spec, arch: str = 'mlp'):
+def _build_networks(env, spec, arch: str = 'mlp', build_stacker: bool = True):
     n_obs = env.n_obstacles
     Z = max(1, env.n_z_levels)
     solver = build_solver_net(
@@ -45,7 +45,7 @@ def _build_networks(env, spec, arch: str = 'mlp'):
         grid_h=spec.Gx, grid_w=spec.Gy,
         n_actions=spec.n_actions,
         in_channels=4,
-    )
+    ) if build_stacker else None
     return solver, stacker
 
 
@@ -64,6 +64,8 @@ def _train_step(net, buf, opt, batch_size):
     if len(buf) < batch_size:
         return None
     xs, pis, zs, masks = buf.sample(batch_size)
+    device = next(net.parameters()).device
+    xs, pis, zs, masks = xs.to(device), pis.to(device), zs.to(device), masks.to(device)
     loss, pl, vl, ent = _az_loss(net, xs, pis, zs, masks)
     opt.zero_grad()
     loss.backward()
@@ -181,13 +183,14 @@ def train(env, cfg):
     random_stacker = bool(cfg.get('random_stacker', False))
 
     net_arch = cfg.get('net_arch', 'mlp')
-    solver_net, stacker_net = _build_networks(env, spec, net_arch)
-    logger.info('net_arch=%s: solver %s (%d params), stacker %s (%d params)',
+    solver_net, stacker_net = _build_networks(env, spec, net_arch,
+                                              build_stacker=not random_stacker)
+    logger.info('net_arch=%s: solver %s (%d params)%s',
                 net_arch,
                 type(solver_net).__name__,
                 sum(p.numel() for p in solver_net.parameters()),
-                type(stacker_net).__name__,
-                sum(p.numel() for p in stacker_net.parameters()))
+                f', stacker {type(stacker_net).__name__} ({sum(p.numel() for p in stacker_net.parameters())} params)'
+                if stacker_net is not None else ' [random stacker]')
     solver_net.to(cfg.device)
 
     solver_opt = torch.optim.Adam(solver_net.parameters(),

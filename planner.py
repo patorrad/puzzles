@@ -143,10 +143,11 @@ def _verify_plan(env: SimulatorEnv, plan: list[dict], root_state: dict,
 
     rewards = [env._compute_reward(s) for s in states]
     avg_reward = sum(rewards) / len(rewards)
-    successes = sum(1 for s in states if env._is_goal(s))
+    goal_flags = [env._is_goal(s) for s in states]
+    successes = sum(goal_flags)
     if verbose:
         print(f'  Verification: {successes}/{n_tries} succeeded. avg_reward={avg_reward:.3f}')
-    return successes, avg_reward
+    return successes, avg_reward, goal_flags
 
 
 def _verify_all_plans(
@@ -283,6 +284,23 @@ class _PlannerBase:
                 verify_push_steps=cfg.get('verify_push_steps', None),
                 action_weights=list(aw) if aw is not None else None,
             )
+        if cfg.planner.name == 'more':
+            from more.planner import MOREPlanner
+            return MOREPlanner(
+                env=env,
+                ppn_path=cfg.planner.get('ppn_checkpoint', None),
+                n_simulations=cfg.planner.n_simulations,
+                tree_depth=cfg.planner.max_depth,
+                gamma=cfg.planner.gamma,
+                k_per_object=cfg.planner.k_per_object,
+                rollout_depth=cfg.planner.rollout_depth,
+                m=cfg.planner.m,
+                c_uct=cfg.planner.c_uct,
+                verify_threshold=cfg.verify_threshold,
+                min_verify_envs=cfg.min_verify_envs,
+                verify_push_steps=cfg.get('verify_push_steps', None),
+                seed=seed,
+            )
         else:
             return RRTPusher(
                 env=env,
@@ -299,15 +317,15 @@ class _PlannerBase:
 
     def verify(self, plan: list[dict], initial_state: dict,
                verbose: bool = True) -> tuple[int, float, float, bool]:
-        """Re-run plan self.batch_size times in parallel and return (successes, avg_reward, rate, passed)."""
+        """Re-run plan self.min_verify_envs times in parallel and return (successes, avg_reward, rate, passed, goal_flags)."""
         with self.env.push_steps_ctx(self.verify_push_steps):
-            successes, avg_reward = _verify_plan(
+            successes, avg_reward, goal_flags = _verify_plan(
                 self.env, plan, initial_state,
-                n_tries=self.batch_size, verbose=verbose,
+                n_tries=self.min_verify_envs, verbose=verbose,
             )
-        rate = successes / self.batch_size
+        rate = successes / self.min_verify_envs
         passed = rate >= self.verify_threshold
-        return successes, avg_reward, rate, passed
+        return successes, avg_reward, rate, passed, goal_flags
 
 
 # ===========================================================================
@@ -443,8 +461,8 @@ class RRTPusher(_PlannerBase):
                     print(f'  Goal reached at iter {i+1}!')
                 path = self._extract_path(goal_node)
                 with self.env.push_steps_ctx(self.verify_push_steps):
-                    verified, avg_reward = _verify_plan(self.env, path, root.state,
-                                                         self.batch_size, verbose,
+                    verified, avg_reward, _ = _verify_plan(self.env, path, root.state,
+                                                            self.batch_size, verbose,
                                                          pause=pause_before_verify)
                 if verified >= self.batch_size * self.verify_threshold:
                     goal_node.reward = avg_reward

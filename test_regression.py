@@ -70,11 +70,11 @@ def test_plan_return_types():
 
 
 def test_verify_return_type():
-    """verify() returns a 4-tuple (successes, avg_reward, rate, passed)."""
+    """verify() returns a 5-tuple (successes, avg_reward, rate, passed, goal_flags)."""
     p = _MockPlanner()
     result = p.verify([], {})
-    assert isinstance(result, tuple) and len(result) == 4
-    successes, avg_reward, rate, passed = result
+    assert isinstance(result, tuple) and len(result) == 5
+    successes, avg_reward, rate, passed, goal_flags = result
     assert isinstance(successes, int)
     assert isinstance(avg_reward, float)
     assert isinstance(rate, float)
