@@ -151,6 +151,7 @@ class MORETree:
         self.m = m
         self.c_uct = c_uct
         self.k_per_object = k_per_object
+        self.last_root: 'MORENode | None' = None
 
     # ------------------------------------------------------------------
     # Main search loop
@@ -182,6 +183,8 @@ class MORETree:
             # Backprop — update N up the path
             for node in path:
                 node.N += 1
+
+        self.last_root = root
 
         if not root.children:
             return None
@@ -269,7 +272,7 @@ class MORETree:
                 done=done,
                 dead_end=dropped,
                 q_ppn_samples=[q_est],
-                rollout_rewards=[reward],
+                rollout_rewards=[] if dropped else [reward],
                 N=1,
             )
             node.children.append(child)
@@ -330,8 +333,9 @@ class MORETree:
             discount *= self.gamma
 
         for i, child in enumerate(children):
-            child.rollout_rewards.append(returns.get(i, 0.0))
-            child.N += 1
+            if i in returns:
+                child.rollout_rewards.append(returns[i])
+                child.N += 1
 
     def _chunked_batch_evaluate(self, pairs: list) -> list:
         """Split pairs into n_envs-sized chunks to avoid overflowing the env pool."""

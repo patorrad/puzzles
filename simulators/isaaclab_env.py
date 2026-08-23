@@ -169,6 +169,9 @@ class BinEnvIsaacLab(SimulatorEnv):
                  force_threshold: float = 100.0,
                  position_iterations: int = 4,
                  velocity_iterations: int = 1,
+                 max_depenetration_velocity: float = 5.0,
+                 settle_depenetration_velocity: float | None = None,
+                 enable_stabilization: bool = False,
                  env_spacing_factor: float = 2.5,
                  post_teleport_steps: int = 10,
                  teleport_settle_steps: int = 3,
@@ -212,10 +215,14 @@ class BinEnvIsaacLab(SimulatorEnv):
 
         self._OBJ_H    = self._OBJ_SIZE / 2
         self._pusher_w = self._OBJ_SIZE * 0.88
+        self.z_levels  = [self._OBJ_H + i * self._OBJ_SIZE for i in range(self.n_z_levels)]
 
         self.force_threshold = force_threshold
         self.position_iterations = position_iterations
         self.velocity_iterations = velocity_iterations
+        self.max_depenetration_velocity = max_depenetration_velocity
+        self.settle_depenetration_velocity = settle_depenetration_velocity
+        self.enable_stabilization = enable_stabilization
         self.post_teleport_steps = post_teleport_steps
         self.teleport_settle_steps = teleport_settle_steps
         self.post_push_steps = post_push_steps
@@ -227,9 +234,8 @@ class BinEnvIsaacLab(SimulatorEnv):
         self._post_step_hook = None   # callable invoked after every _step_sim; used by record_replay
         self._force_render   = False  # when True, _step_sim always renders (used by replay)
 
-        _park_y = -(max(self.bin_w, self.bin_d) * 1.5 + 0.1)
-        self._park = [self.bin_w / 2, _park_y, self._OBJ_H]
-        self.z_levels = [self._OBJ_H + i * self._OBJ_SIZE for i in range(n_z_levels)]
+        _park_x = -(max(self.bin_w, self.bin_d) * 1.5 + 0.1)
+        self._park = [_park_x, self.bin_w / 2, self._OBJ_H]  # x=NS behind bin, y=EW center
         self.device   = "cuda" if torch.cuda.is_available() else "cpu"
 
         # Compute per-env world origins so envs don't overlap.
@@ -291,6 +297,7 @@ class BinEnvIsaacLab(SimulatorEnv):
             device=self.device,
             physx=PhysxCfg(
                 enable_ccd=False,
+                enable_stabilization=self.enable_stabilization,
                 min_position_iteration_count=self.position_iterations,
                 min_velocity_iteration_count=self.velocity_iterations,
                 enable_external_forces_every_iteration=True,
@@ -327,6 +334,7 @@ class BinEnvIsaacLab(SimulatorEnv):
                 kinematic_enabled=kinematic,
                 disable_gravity=kinematic,
                 solver_position_iteration_count=pos_iters,
+                max_depenetration_velocity=self.max_depenetration_velocity,
             ),
             mass_props=sim_utils.MassPropertiesCfg(mass=mass),
             collision_props=sim_utils.CollisionPropertiesCfg(
@@ -427,23 +435,23 @@ class BinEnvIsaacLab(SimulatorEnv):
             (bw + 2*wt, bd + 2*wt, wt),
             mass=1.0, kinematic=True, friction=fr, color=(0.7, 0.6, 0.5))
         north_cfg  = self._make_box_cfg(
-            (bw + 2*wt, wt, BIN_H),
+            (wt, bw + 2*wt, BIN_H),   # thin in x (NS), spans y (EW)
             mass=1.0, kinematic=True, friction=fr, color=(0.5, 0.5, 0.8),
             contact_offset=0.02)
         west_cfg   = self._make_box_cfg(
-            (wt, bd, BIN_H),
+            (bd, wt, BIN_H),          # spans x (NS), thin in y (EW)
             mass=1.0, kinematic=True, friction=fr, color=(0.5, 0.5, 0.8),
             contact_offset=0.02)
         east_cfg   = self._make_box_cfg(
-            (wt, bd, BIN_H),
+            (bd, wt, BIN_H),
             mass=1.0, kinematic=True, friction=fr, color=(0.5, 0.5, 0.8),
             contact_offset=0.02)
         pns_cfg    = self._make_box_cfg(
-            (self._pusher_w, PUSHER_T, self._pusher_w),
+            (PUSHER_T, self._pusher_w, self._pusher_w),   # thin in x (NS sweep direction)
             mass=10.0, kinematic=True, friction=fr, color=(0.2, 0.9, 0.2),
             activate_contact_sensors=True)
         pew_cfg    = self._make_box_cfg(
-            (PUSHER_T, self._pusher_w, self._pusher_w),
+            (self._pusher_w, PUSHER_T, self._pusher_w),   # thin in y (EW sweep direction)
             mass=10.0, kinematic=True, friction=fr, color=(0.9, 0.6, 0.1),
             activate_contact_sensors=True)
         target_cfg = self._make_box_cfg(
@@ -466,7 +474,7 @@ class BinEnvIsaacLab(SimulatorEnv):
         # Visual-only plane marking EXIT_Y — kinematic, collision disabled so
         # the target can pass through it freely.
         exit_marker_cfg = sim_utils.CuboidCfg(
-            size=(bw, 0.004, .02),
+            size=(0.004, bw, .02),    # thin in x (NS), spans y (EW)
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 kinematic_enabled=True,
                 disable_gravity=True,
@@ -478,8 +486,13 @@ class BinEnvIsaacLab(SimulatorEnv):
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.5, 0.0)),
         )
 
-        # Ground plane (one shared plane under all envs)
-        sim_utils.GroundPlaneCfg().func("/World/GroundPlane", sim_utils.GroundPlaneCfg())
+        # Ground plane — large kinematic box replaces GroundPlaneCfg whose
+        # USD asset has a baked-in grid shader that can't be suppressed.
+        ground_cfg = self._make_box_cfg(
+            (200.0, 200.0, 0.01),
+            mass=1.0, kinematic=True, friction=fr, color=(0.4, 0.4, 0.4)
+        )
+        self._spawn_prim("/World/GroundPlane", ground_cfg, pos=(0.0, 0.0, -0.005))
 
         for ei in range(self.n_envs):
             ox = self.env_origins[ei, 0].item()
@@ -487,18 +500,19 @@ class BinEnvIsaacLab(SimulatorEnv):
             ep = f"/World/envs/env_{ei}"
 
             # Static geometry
+            # Bin: NS along world x (exit at low x), EW along world y.
             self._spawn_prim(f"{ep}/Floor", floor_cfg,
-                             (ox + bw/2, oy + bd/2, -wt/2))
+                             (ox + bd/2, oy + bw/2, -wt/2))
             self._spawn_prim(f"{ep}/WallNorth", north_cfg,
-                             (ox + bw/2, oy + bd + wt/2, BIN_H/2))
+                             (ox + bd + wt/2, oy + bw/2, BIN_H/2))
             self._spawn_prim(f"{ep}/WallWest",  west_cfg,
-                             (ox - wt/2, oy + bd/2, BIN_H/2))
+                             (ox + bd/2, oy - wt/2, BIN_H/2))
             self._spawn_prim(f"{ep}/WallEast",  east_cfg,
-                             (ox + bw + wt/2, oy + bd/2, BIN_H/2))
+                             (ox + bd/2, oy + bw + wt/2, BIN_H/2))
 
-            # Exit boundary marker at EXIT_Y (south of the bin opening)
+            # Exit boundary marker at EXIT_Y (west of the bin opening)
             self._spawn_prim(f"{ep}/ExitMarker", exit_marker_cfg,
-                             (ox + bw/2, oy + EXIT_Y, self._OBJ_H))
+                             (ox + EXIT_Y, oy + bw/2, self._OBJ_H))
 
             # Kinematic pushers (parked outside bin)
             park_w = self._local_to_world(self._park, ei)
@@ -517,6 +531,12 @@ class BinEnvIsaacLab(SimulatorEnv):
                 self._spawn_prim(f"{ep}/Obstacle{oi}", obs_cfgs[oi],
                                  self._local_to_world([x0 + (oi + 1) * step,
                                                        bd / 2, self._OBJ_H], ei))
+
+        self._dynamic_prim_paths = (
+            [f"/World/envs/env_{ei}/Target" for ei in range(self.n_envs)]
+            + [f"/World/envs/env_{ei}/Obstacle{oi}"
+               for ei in range(self.n_envs) for oi in range(self.n_obstacles)]
+        )
 
         # Wrap dynamic prims in batched RigidObject views.
         # spawn=None means "attach to existing prims, do not re-spawn".
@@ -597,20 +617,26 @@ class BinEnvIsaacLab(SimulatorEnv):
         """Return (eye, target) world positions scaled to the current bin size."""
         bw, bd = self.bin_w, self.bin_d
         view_dist = max(bw, bd) * 1.5
-        target = (ox + bw / 2, oy + bd * 0.1, self._OBJ_H)
-        # Camera direction: slightly right, mostly south, elevated (unit vector)
-        eye = (target[0] + 0.183 * view_dist,
-               target[1] - 0.948 * view_dist,
+        # Look slightly inside the bin from the exit (west/low-x) side
+        target = (ox + bd * 0.1, oy + bw / 2, self._OBJ_H)
+        # Camera direction: mostly west (negative x = exit side), slightly north, elevated
+        eye = (target[0] - 0.948 * view_dist,
+               target[1] + 0.183 * view_dist,
                target[2] + 0.320 * view_dist)
         return eye, target
 
     def _local_to_world(self, pos_local: list, env_idx: int) -> tuple:
-        """Convert a bin-local 3-D position to world coordinates."""
+        """Convert a bin-local 3-D position to world coordinates.
+
+        Bin-local: x=NS/forward (exit at x→0), y=EW/lateral.
+        Bin placed with NS along world x, EW along world y.
+        Exit is at negative world x (west face open).
+        """
         ox, oy = self._env_origins_xy[env_idx]
         return (pos_local[0] + ox, pos_local[1] + oy, pos_local[2])
 
     def _world_to_local(self, pos_world: torch.Tensor, env_idx: int) -> torch.Tensor:
-        """Subtract the env origin so positions are in bin-local frame."""
+        """Subtract env origin; returns bin-local frame (x=NS, y=EW). No axis swap."""
         origin = self.env_origins[env_idx].to(pos_world.device)
         return pos_world - origin
 
@@ -675,8 +701,8 @@ class BinEnvIsaacLab(SimulatorEnv):
             # Quat is pre-filled with _IDENTITY_QUAT at build time — no write needed.
             ei = env_idx if env_idx is not None else int(env_ids[0].item())
             ox, oy = self._env_origins_xy[ei]
-            pose_buf[0, 0] = pos_local[0] + ox
-            pose_buf[0, 1] = pos_local[1] + oy
+            pose_buf[0, 0] = pos_local[0] + ox  # world x = NS = bin-local x
+            pose_buf[0, 1] = pos_local[1] + oy  # world y = EW = bin-local y
             pose_buf[0, 2] = pos_local[2]
             obj.write_root_pose_to_sim(pose_buf, env_ids=env_ids)
         else:
@@ -700,18 +726,27 @@ class BinEnvIsaacLab(SimulatorEnv):
     def wait_for_input(self, prompt: str = '  [Press Enter to continue...]') -> None:
         """Keep the Isaac Sim viewport live while waiting for the user to press Enter.
 
-        Spins on sim.render() + non-blocking stdin poll so the viewer stays
-        interactive (plain input() would freeze the UI thread).
+        Spins on sim.render() + non-blocking /dev/tty poll so the viewer stays
+        interactive (plain input() would freeze the UI thread). Uses /dev/tty
+        directly so this works in spawned child processes where stdin is closed.
         """
-        import sys
         import select
         print(prompt, flush=True)
-        while True:
-            self.sim.render()
-            ready, _, _ = select.select([sys.stdin], [], [], 0)
-            if ready:
-                sys.stdin.readline()
-                break
+        try:
+            tty = open('/dev/tty', 'r')
+        except OSError:
+            import sys
+            tty = sys.stdin
+        try:
+            while True:
+                self.sim.render()
+                ready, _, _ = select.select([tty], [], [], 0)
+                if ready:
+                    tty.readline()
+                    break
+        finally:
+            if tty is not __import__('sys').stdin:
+                tty.close()
 
     # ------------------------------------------------------------------
     # Object placement (single mode only)
@@ -796,11 +831,12 @@ class BinEnvIsaacLab(SimulatorEnv):
             # root_quat_w shape: (n_envs, 4), convention (w,x,y,z)
             return obj.data.root_quat_w[env_idx].clone()
 
+        raw_obs_world = self.obstacle_collection.data.object_link_pose_w[env_idx, :, :3].clone()
+        raw_obs_rel   = raw_obs_world - self.env_origins[env_idx].to(self.device)  # [NS, EW, z]
         return {
             'target_pos':    _pos(self.target_obj),
             'target_quat':   _quat(self.target_obj),
-            'obstacle_pos':  (self.obstacle_collection.data.object_link_pose_w[env_idx, :, :3].clone()
-                              - self.env_origins[env_idx].to(self.device)),
+            'obstacle_pos':  raw_obs_rel,   # world == local (no swap)
             'obstacle_quat': self.obstacle_collection.data.object_link_pose_w[env_idx, :, 3:].clone(),
         }
 
@@ -819,7 +855,7 @@ class BinEnvIsaacLab(SimulatorEnv):
         k = len(states)
         origins = self._origins_xyz[env_ids]           # (k, 3), pure GPU index
 
-        # Target
+        # Target — bin-local [NS, EW, z] == world order (no swap)
         tgt_pos  = torch.stack([s['target_pos'].to(self.device)  for s in states])  # (k, 3)
         tgt_quat = torch.stack([s['target_quat'].to(self.device) for s in states])  # (k, 4)
         buf = self._batch_tgt_pose_buf[:k]
@@ -828,7 +864,7 @@ class BinEnvIsaacLab(SimulatorEnv):
         self.target_obj.write_root_pose_to_sim(buf, env_ids=env_ids)
         self.target_obj.write_root_velocity_to_sim(self._batch_vel_zero[:k], env_ids=env_ids)
 
-        # Obstacles
+        # Obstacles — same no-swap
         obs_pos  = torch.stack([s['obstacle_pos'].to(self.device)  for s in states])  # (k, n_obs, 3)
         obs_quat = torch.stack([s['obstacle_quat'].to(self.device) for s in states])  # (k, n_obs, 4)
         obs_buf  = self._batch_obs_state_buf[:k]
@@ -871,16 +907,20 @@ class BinEnvIsaacLab(SimulatorEnv):
                 self._place_objects()
                 return self._get_state(0)
             if env_idx is not None:
-                initial = {
-                    'target_pos':    torch.tensor([self.bin_w/2, self.bin_d/2, self._OBJ_H],
-                                                  device=self.device),
-                    'target_quat':   torch.tensor([1., 0., 0., 0.],
-                                                  device=self.device),
-                    'obstacle_pos':  torch.tensor([[self.bin_w/2, self.bin_d/2, self._OBJ_H]],
-                                                  device=self.device).expand(self.n_obstacles, -1),
-                    'obstacle_quat': torch.tensor([[1., 0., 0., 0.]],
-                                                  device=self.device).expand(self.n_obstacles, -1),
-                }
+                from simulators.placement import random_initial_state
+                initial = random_initial_state(
+                    self.n_obstacles,
+                    obj_size=self._effective_obj_size,
+                    stackable=self.stackable,
+                    difficult_spawn=self.difficult_spawn,
+                    bin_w=self.bin_w,
+                    bin_d=self.bin_d,
+                    n_z_levels=self.n_z_levels,
+                    target_z_level=self.target_z_level,
+                    force_obstacle_on_target=self.force_obstacle_on_target,
+                    obj_height=self._OBJ_H,
+                )
+                initial = {k: v.to(self.device) for k, v in initial.items()}
                 self._set_state(initial, env_idx)
                 return self._get_state(env_idx)
             return {}
@@ -975,6 +1015,11 @@ class BinEnvIsaacLab(SimulatorEnv):
         # Repeated-teleport settle: re-write all objects to target positions after every
         # step so the contact manifold builds up against the correct configuration rather
         # than stale PhysX warm-start impulses from the prior frame.
+        _settle_vel = self.settle_depenetration_velocity
+        _swap_vel = _settle_vel is not None and _settle_vel != self.max_depenetration_velocity
+        if _swap_vel:
+            self._set_depenetration_velocity(_settle_vel)
+
         for _ in range(self.teleport_settle_steps):
             self._step_sim(render=False)
             self._set_state_batch(states_k, env_ids_k)
@@ -982,6 +1027,9 @@ class BinEnvIsaacLab(SimulatorEnv):
         # Free settle — lets objects find their resting contact.
         for _ in range(self.post_teleport_steps):
             self._step_sim(render=False)
+
+        if _swap_vel:
+            self._set_depenetration_velocity(self.max_depenetration_velocity)
 
         # 2. Warm-up: place pushers at stroke start, settle 2 ticks
         for env_idx, (ptype, start, _) in enumerate(strokes):
@@ -1017,8 +1065,9 @@ class BinEnvIsaacLab(SimulatorEnv):
             ends   = torch.tensor([strokes[i][2] for i in idxs], dtype=torch.float32)
             ox     = torch.tensor([self._env_origins_xy[i][0] for i in idxs], dtype=torch.float32)
             oy     = torch.tensor([self._env_origins_xy[i][1] for i in idxs], dtype=torch.float32)
+            # bin-local [NS, EW, z] == world order (no swap): just add origin
             pos0   = starts.clone(); pos0[:, 0] += ox; pos0[:, 1] += oy
-            delta  = ends - starts   # bin-local delta; origin cancels in the difference
+            delta  = ends - starts
             ids    = torch.tensor(idxs, dtype=torch.long)
             return pos0.to(self.device), delta.to(self.device), ids.to(self.device)
 
@@ -1127,16 +1176,24 @@ class BinEnvIsaacLab(SimulatorEnv):
     # ------------------------------------------------------------------
 
     def _obstacles_dropped(self, state: dict) -> bool:
-        return any(float(state['obstacle_pos'][i][1]) < EXIT_Y
+        return any(float(state['obstacle_pos'][i][0]) < EXIT_Y   # pos[0] = NS/forward
                    for i in range(self.n_obstacles))
 
     def _is_goal(self, state: dict) -> bool:
         if self._obstacles_dropped(state):
             return False
-        return bool(float(state['target_pos'][1]) <= EXIT_Y)
+        return bool(float(state['target_pos'][0]) <= EXIT_Y)     # pos[0] = NS/forward
 
     def step_physics(self) -> None:
         self._step_sim(render=False)
+
+    def _set_depenetration_velocity(self, vel: float) -> None:
+        from pxr import PhysxSchema
+        stage = self.sim.stage
+        for path in self._dynamic_prim_paths:
+            api = PhysxSchema.PhysxRigidBodyAPI(stage.GetPrimAtPath(path))
+            if api:
+                api.GetMaxDepenetrationVelocityAttr().Set(vel)
 
     # ------------------------------------------------------------------
     # Replay
@@ -1154,15 +1211,16 @@ class BinEnvIsaacLab(SimulatorEnv):
         for _ in range(5):
             self._step_sim()
 
-        input('Press Enter to start replay...')
+        self.wait_for_input('Press Enter to start replay...')
 
         state = initial_state
         done  = False
         for step_i, action in enumerate(plan):
             atype = action['action_type']
+            pos_str = str(action.get('push_pos', action.get('push_start_xy', '?')))
             logger.info('  Step %d/%d: [%s] obj=%s pos=%s z=%.3f',
-                        step_i + 1, len(plan), atype, action["obj_idx"],
-                        torch.round(action["push_pos"], decimals=3), action["push_z"])
+                        step_i + 1, len(plan), atype, action.get("obj_idx", '?'),
+                        pos_str, action["push_z"])
             (state, reward, done), = self.batch_evaluate([(state, action)])
             logger.info('  -> reward=%.3f, done=%s', reward, done)
             if done:
@@ -1172,7 +1230,7 @@ class BinEnvIsaacLab(SimulatorEnv):
         self._force_render = False
         if not done:
             logger.info('  Plan executed (target may not have fully escaped).')
-        input('Press Enter to close...')
+        self.wait_for_input('Press Enter to close...')
 
     def record_replay(
         self,
@@ -1193,8 +1251,8 @@ class BinEnvIsaacLab(SimulatorEnv):
         ox = self.env_origins[0, 0].item()
         oy = self.env_origins[0, 1].item()
         bw, bd = self.bin_w, self.bin_d
-        rec_target = (ox + bw / 2, oy + bd / 2, self._OBJ_H)
-        rec_eye    = (ox + bw / 2, oy - 1.0,    1.2)
+        rec_target = (ox + bd / 2, oy + bw / 2, self._OBJ_H)
+        rec_eye    = (ox - 1.0,    oy + bw / 2, 1.2)   # west side (exit side)
         camera = rep.create.camera(position=rec_eye, look_at=rec_target)
         render_product = rep.create.render_product(camera, resolution=resolution)
         rgb_ann = rep.AnnotatorRegistry.get_annotator("rgb")

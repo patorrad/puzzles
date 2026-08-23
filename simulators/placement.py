@@ -31,8 +31,9 @@ def _place_objects_once(
     """Single placement attempt. Caller is responsible for seeding."""
     obj_h    = obj_height if obj_height is not None else obj_size / 2
     margin   = obj_size * 0.7
-    x_lo, x_hi = margin, bin_w - margin
-    y_lo, y_hi = margin, bin_d - margin
+    # x = NS/forward (range [0, bin_d]), y = EW/lateral (range [0, bin_w])
+    x_lo, x_hi = margin, bin_d - margin
+    y_lo, y_hi = margin, bin_w - margin
 
     columns:   list[tuple[float, float, int]] = []
     positions: list[list[float]] = []
@@ -50,7 +51,7 @@ def _place_objects_once(
                 _target_z = int(eligible_levels[int(torch.randint(len(eligible_levels), (1,)).item())])
             else:
                 _target_z = 0
-        obj_y_lo  = bin_d / 2 if (is_target and difficult_spawn) else y_lo
+        obj_x_lo  = bin_d / 2 if (is_target and difficult_spawn) else x_lo
 
         placed = False
 
@@ -58,7 +59,7 @@ def _place_objects_once(
             # Find a column that already has exactly target_z_level objects so
             # the target sits at that height with full support beneath it.
             eligible = [(i, c) for i, c in enumerate(columns)
-                        if c[2] == _target_z and (not difficult_spawn or c[1] >= bin_d / 2)]
+                        if c[2] == _target_z and (not difficult_spawn or c[0] >= bin_d / 2)]
             if eligible:
                 idx = int(torch.randint(len(eligible), (1,)).item())
                 choice_i, (x, y, count) = eligible[idx]
@@ -69,10 +70,10 @@ def _place_objects_once(
 
         if not placed:
             sep = obj_size * 1.05  # minimum column separation
-            can_stack = (stackable or n_z_levels > 1) and not is_target
+            can_stack = stackable and not is_target
             for _ in range(500):
-                x = torch.empty(1).uniform_(x_lo, x_hi).item()
-                y = torch.empty(1).uniform_(obj_y_lo, y_hi).item()
+                x = torch.empty(1).uniform_(obj_x_lo, x_hi).item()
+                y = torch.empty(1).uniform_(y_lo, y_hi).item()
 
                 if can_stack and columns:
                     # If the sample lands within the rejection radius of a column,
@@ -99,8 +100,8 @@ def _place_objects_once(
                     break
 
             if not placed:
-                positions.append([bin_w / 2, bin_d / 2, obj_h])
-                columns.append((bin_w / 2, bin_d / 2, 1))
+                positions.append([bin_d / 2, bin_w / 2, obj_h])  # x=NS center, y=EW center
+                columns.append((bin_d / 2, bin_w / 2, 1))
 
     # If the target didn't land at the requested level, swap with an obstacle at that level.
     if n_obstacles > 0 and _target_z is not None and _target_z > 0:
@@ -108,7 +109,7 @@ def _place_objects_once(
         if abs(positions[n_obstacles][2] - target_z_height) > 1e-4:
             for obs_idx in range(n_obstacles):
                 if abs(positions[obs_idx][2] - target_z_height) < 1e-4:
-                    if difficult_spawn and positions[obs_idx][1] < bin_d / 2:
+                    if difficult_spawn and positions[obs_idx][0] < bin_d / 2:  # x=NS
                         continue
                     positions[n_obstacles], positions[obs_idx] = positions[obs_idx], positions[n_obstacles]
                     break
@@ -140,14 +141,15 @@ def _place_objects_once(
 
 def _path_blocker_value(state: dict, n_obstacles: int, scale: float = 0.16, weight: float = 0.5) -> float:
     """Compute path_blocker reward component (<=0; more negative = more blocked)."""
-    tx = state['target_pos'][0].item()
-    ty = state['target_pos'][1].item()
+    # pos[0] = NS/forward, pos[1] = EW/lateral
+    t_ns = state['target_pos'][0].item()
+    t_ew = state['target_pos'][1].item()
     value = 0.0
     for i in range(n_obstacles):
-        oy = state['obstacle_pos'][i][1].item()
-        if 0.0 < oy < ty:
-            x_dist = abs(state['obstacle_pos'][i][0].item() - tx)
-            value -= weight * max(0.0, 1.0 - x_dist / scale)
+        o_ns = state['obstacle_pos'][i][0].item()
+        if 0.0 < o_ns < t_ns:
+            ew_dist = abs(state['obstacle_pos'][i][1].item() - t_ew)
+            value -= weight * max(0.0, 1.0 - ew_dist / scale)
     return value
 
 
@@ -231,7 +233,7 @@ def random_initial_state(
     return state
 
 
-def make_state(target_xy: tuple, obstacle_xys: list, obj_size: float) -> dict:
+def make_state(target_xy: tuple, obstacle_xys: list, obj_size: float = 0.05) -> dict:
     """
     Build a state dict from (x, y) tuples; z is set to obj_size/2 for all objects.
 

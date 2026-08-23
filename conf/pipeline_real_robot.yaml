@@ -1,0 +1,26 @@
+defaults:
+  - pipeline
+  - _self_
+
+viewer: replay
+
+# Server mode: pull env setup from the running planner instead of a YAML.
+# Usage: python pipeline.py --config-name=pipeline scenario_source=server
+scenario_source: server
+server_scenario_name: server_scenario
+scenario_file: null
+
+use_real_world: true            # use real_world.py instead of world.py for MPC execution
+show_mpc_planner_viewer: false  # open Isaac viewer during puzzle planning (planner.py / puzzle solver)
+show_mpc_world_viewer: true     # open Isaac viewer during MPC execution (world.py)
+
+# Video recording (IsaacLab only; requires omni.replicator — uses ISAACLAB_ENABLE_CAMERAS)
+record_video: true
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  job_logging:
+    root:
+      level: WARNING

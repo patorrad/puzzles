@@ -3,7 +3,7 @@ defaults:
   - override simulator: isaaclab
   - _self_
 # Environment
-n_obstacles: 10
+n_obstacles: 7
 parallel_envs: 16
 difficult_spawn: true
 
@@ -29,6 +29,7 @@ csv_path: null            # set to a path like "results/benchmark.csv" to enable
 
 # Solution saving (for robotic execution)
 solutions_dir: null       # set to a directory path to save per-episode solution JSONs
+collect_data_dir: null    # set to a directory path to save per-episode MORE tree node data (.pt)
 
 # WandB
 wandb_project: "bin-clearing-benchmark"

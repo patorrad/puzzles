@@ -136,8 +136,6 @@ class BinEnv(SimulatorEnv):
                 self._mesh_files[shape_name] = path
 
         self._park = [-0.3, self.bin_d / 2, self._OBJ_H]
-        self.z_levels = [self._OBJ_H + i * self._OBJ_SIZE for i in range(n_z_levels)]
-
         self._build_scene()
 
     # ------------------------------------------------------------------

@@ -1,19 +1,19 @@
 # Scenario matching the ur16e_reach_stand_blocks example in isaaclabmpc.
-# Positions are in puzzle bin frame (bin 0..BIN_W × 0..BIN_D); z = OBJ_H.
+# Positions: pos = [NS/forward, EW/lateral, z].
 # Source: isaaclabmpc/examples/ur16e_reach_stand_blocks/solution_obs_3_simple_extraction.json
 
 n_obstacles: 3
-bin_size: 0.3
+bin_size: 0.2
 wall_thickness: 0.02
 friction: 1.2
 
 initial_state:
-  target_pos: [0.2297, 0.2127, 0.025]
+  target_pos: [0.2127, 0.2297, 0.025]
   target_quat: [1.0, 0.0, 0.0, 0.0]
   obstacles:
-    - pos: [0.2374, 0.0825, 0.025]
+    - pos: [0.0825, 0.2374, 0.025]
       quat: [1.0, 0.0, 0.0, 0.0]
-    - pos: [0.0608, 0.0712, 0.025]
+    - pos: [0.0712, 0.0608, 0.025]
       quat: [1.0, 0.0, 0.0, 0.0]
-    - pos: [0.0765, 0.2095, 0.025]
+    - pos: [0.2095, 0.0765, 0.025]
       quat: [1.0, 0.0, 0.0, 0.0]

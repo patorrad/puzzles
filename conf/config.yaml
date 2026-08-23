@@ -17,7 +17,7 @@ obj_size: 0.05   # object cube side length (metres) — one cell of any shape
 obstacle_shapes: null  # null=all cubes; list of shape names e.g. [L, T, cube]; available: cube I O T S Z L J
 n_z_levels: 1
 target_z_level: null  # null = floor; integer forces the target to that z level (0=floor, 1=stacked, ...)
-force_obstacle_on_target: false  # if true, one obstacle is placed on top of the target (requires n_z_levels > target_z_level + 1)
+force_obstacle_on_target: false  # if true, one obstacle is placed on top of the target (requires max_stack_height > target_z_level + 1)
 push_steps: 256
 verify_push_steps: 256   # null = same as push_steps; integer = use this for verify + video
 substeps: 4
@@ -29,6 +29,7 @@ seed: null
 # Runtime
 verify_threshold: 0.0 #75   # fraction of envs that must succeed to accept a plan
 min_verify_envs: 16      # minimum envs allocated per plan during multi-plan verification
+prune_plan: false        # if true, remove redundant steps from the solution after verification
 viewer: always        # headless | replay | verify | always
 pause_before_verify: false
 save: null          # generic solution save path (any use)

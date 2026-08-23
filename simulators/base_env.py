@@ -91,10 +91,6 @@ class SimulatorEnv(ABC):
         if self.n_envs == 1 and seed is not None:
             torch.manual_seed(seed)
 
-        # Discrete z levels: floor height, one-box up, two-boxes up, ...
-        # This will be set by subclasses based on OBJ_H and OBJ_SIZE
-        self.z_levels = []
-
         # Sim run counters (incremented by batch_evaluate; reset by benchmark)
         self.batch_calls: int = 0
         self.total_pairs: int = 0
@@ -255,7 +251,7 @@ class SimulatorEnv(ABC):
             e = action['push_end_xy']
             dx = abs(float(e[0]) - float(s[0]))
             dy = abs(float(e[1]) - float(s[1]))
-            pusher = 'ns' if dy >= dx else 'ew'
+            pusher = 'ns' if dx >= dy else 'ew'
             return (pusher,
                     [float(s[0]), float(s[1]), z],
                     [float(e[0]), float(e[1]), z])
@@ -263,20 +259,20 @@ class SimulatorEnv(ABC):
         pos = action['push_pos']
         if atype == 'push_n':
             return ('ns',
-                    [pos[0], pos[1] - approach_dist, z],
-                    [pos[0], pos[1] + push_dist,     z])
-        if atype == 'pull_s':
-            return ('ns',
-                    [pos[0], pos[1] + approach_dist,        z],
-                    [pos[0], self._EXIT_Y - approach_dist,  z])
-        if atype == 'push_e':
-            return ('ew',
                     [pos[0] - approach_dist, pos[1], z],
                     [pos[0] + push_dist,     pos[1], z])
+        if atype == 'pull_s':
+            return ('ns',
+                    [pos[0] + approach_dist,       pos[1], z],
+                    [self._EXIT_Y - approach_dist, pos[1], z])
+        if atype == 'push_e':
+            return ('ew',
+                    [pos[0], pos[1] - approach_dist, z],
+                    [pos[0], pos[1] + push_dist,     z])
         # push_w
         return ('ew',
-                [pos[0] + approach_dist, pos[1], z],
-                [pos[0] - push_dist,     pos[1], z])
+                [pos[0], pos[1] + approach_dist, z],
+                [pos[0], pos[1] - push_dist,     z])
 
     @abstractmethod
     def _batch_evaluate_impl(self, pairs: List[Tuple[Dict, Dict]]) -> List[Tuple[Dict, float, bool]]:
@@ -310,29 +306,30 @@ class SimulatorEnv(ABC):
         EXIT_Y = self._EXIT_Y
         cfg = self.reward_cfg
 
+        # pos[0] = NS/forward, pos[1] = EW/lateral
         target_progress = 0.0
         if cfg is None or cfg.target_progress.enabled:
-            y = float(state['target_pos'][1])
-            target_progress = float(min(max((self.bin_d / 2 - y) / (self.bin_d / 2 - EXIT_Y), 0.0), 2.0))
+            ns = float(state['target_pos'][0])
+            target_progress = float(min(max((self.bin_d / 2 - ns) / (self.bin_d / 2 - EXIT_Y), 0.0), 2.0))
 
         obstacle_penalty = 0.0
         if cfg is None or cfg.obstacle_penalty.enabled:
             weight = 0.5 if cfg is None else cfg.obstacle_penalty.weight
             n_dropped = sum(1 for i in range(self.n_obstacles)
-                            if float(state['obstacle_pos'][i][1]) < EXIT_Y)
+                            if float(state['obstacle_pos'][i][0]) < EXIT_Y)
             obstacle_penalty = -weight * n_dropped
 
         path_blocker = 0.0
         if cfg is None or cfg.path_blocker.enabled:
             weight = 0.5 if cfg is None else cfg.path_blocker.weight
             scale  = 0.16 if cfg is None else cfg.path_blocker.scale
-            tx = float(state['target_pos'][0])
-            ty = float(state['target_pos'][1])
+            t_ns = float(state['target_pos'][0])
+            t_ew = float(state['target_pos'][1])
             for i in range(self.n_obstacles):
-                oy = float(state['obstacle_pos'][i][1])
-                if 0.0 < oy < ty:
-                    x_dist = abs(float(state['obstacle_pos'][i][0]) - tx)
-                    path_blocker -= weight * max(0.0, 1.0 - x_dist / scale)
+                o_ns = float(state['obstacle_pos'][i][0])
+                if 0.0 < o_ns < t_ns:
+                    ew_dist = abs(float(state['obstacle_pos'][i][1]) - t_ew)
+                    path_blocker -= weight * max(0.0, 1.0 - ew_dist / scale)
 
         return {
             'target_progress': target_progress,

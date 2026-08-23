@@ -7,6 +7,7 @@ __pycache__/
 dist/
 build/
 outputs/
+test_scenarios/
 
 # Generated data and model artefacts
 dataset.npz

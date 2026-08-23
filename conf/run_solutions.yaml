@@ -1,0 +1,41 @@
+defaults:
+  - _self_
+
+# Required: path to directory containing .json solution files
+# Can be relative (from repo root) or absolute
+solutions_dir: solutions/mcts_5obs_stacked2_difficult
+
+# Optional: directory with scenario .yaml files named identically to solution .json files.
+# When a match is found the YAML is passed to isaaclabmpc for precise scene setup.
+# If null, initial state is reconstructed from the solution JSON's embedded data.
+scenario_dir: null
+
+# Limit the number of solutions to process (null = all)
+max_solutions: null
+
+# IsaacLab MPC subprocesses
+isaaclabmpc_dir: /home/paolo/Documents/isaaclabmpc/examples/ur16e_stacked_robot
+isaaclabmpc_timeout_s: 300
+isaaclabmpc_n_steps: 10000
+show_mpc_planner_viewer: false
+show_mpc_world_viewer: true
+
+# Scene geometry (used for wandb visualisation only; not passed to isaaclabmpc)
+bin_size: 0.4
+obj_size: 0.05
+wall_thickness: 0.02
+
+# Output
+output_dir: outputs/run_solutions
+use_wandb: true
+wandb_project: bin-clearing-pipeline
+wandb_entity: null
+wandb_run_name: null   # defaults to solutions_dir basename
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+  job_logging:
+    root:
+      level: WARNING

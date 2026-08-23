@@ -20,16 +20,19 @@ def render_scenario(state: dict, bin_w: float, bin_d: float,
     obj_h = obj_size / 2
 
     fig, ax = plt.subplots(figsize=(4, 4))
-    ax.set_xlim(-0.05, bin_w + 0.05)
-    ax.set_ylim(-0.15, bin_d + 0.05)
+    # x-axis = NS/forward (exit at left, north at right)
+    # y-axis = EW/lateral
+    ax.set_xlim(-0.15, bin_d + 0.05)
+    ax.set_ylim(-0.05, bin_w + 0.05)
     ax.set_aspect('equal')
     ax.set_facecolor('#f5f5f5')
 
     wt = wall_thickness
     for xy, wh in [
-        ((-wt, 0),      (wt, bin_d)),   # west
-        ((bin_w, 0),    (wt, bin_d)),   # east
-        ((0, bin_d),    (bin_w, wt)),   # north
+        ((0,     -wt),  (bin_d, wt)),           # west  (EW = 0)
+        ((0,  bin_w),   (bin_d, wt)),           # east  (EW = bin_w)
+        ((bin_d, -wt),  (wt, bin_w + 2 * wt)), # north (NS = bin_d)
+        # south/exit opening at NS = 0 is intentionally left open
     ]:
         ax.add_patch(patches.Rectangle(xy, wh[0], wh[1], color='#333'))
 
@@ -63,10 +66,10 @@ def render_scenario(state: dict, bin_w: float, bin_d: float,
                 fontsize=6, color='white', fontweight='bold',
                 ha='center', va='center', zorder=5 + tz_level)
 
-    ax.annotate('', xy=(bin_w / 2, -0.10), xytext=(bin_w / 2, 0.02),
+    ax.annotate('', xy=(-0.10, bin_w / 2), xytext=(0.02, bin_w / 2),
                 arrowprops=dict(arrowstyle='->', color='green', lw=1.5))
-    ax.set_xlabel('x (m)')
-    ax.set_ylabel('y (m)')
+    ax.set_xlabel('NS / forward (m)   exit ←')
+    ax.set_ylabel('EW / lateral (m)')
     ax.set_title(title)
     fig.tight_layout()
     return fig
@@ -75,13 +78,13 @@ def render_scenario(state: dict, bin_w: float, bin_d: float,
 def _bin_to_mppi(x_bin: float, y_bin: float):
     """Convert bin-frame (x, y) to MPPI local (x_mppi, y_mppi).
 
-    Matches scene.py:_bin_to_mppi_local(). x_mppi is the forward-reach axis
-    (maps to bin y / north-south), y_mppi is the lateral axis (maps to bin x
-    / east-west) with a 0.20 m physical gap at y_mppi ∈ (-0.10, 0.10) where
-    the robot arm body sits.
+    Bin frame: x = NS/forward, y = EW/lateral.
+    x_mppi is the forward-reach axis (maps to bin x / north-south).
+    y_mppi is the lateral axis (maps to bin y / east-west) with a 0.20 m
+    physical gap at y_mppi ∈ (-0.10, 0.10) where the robot arm body sits.
     """
-    x_mppi = y_bin + 0.10
-    y_mppi = (x_bin - 0.15) + 0.10 * (1.0 if x_bin >= 0.15 else -1.0)
+    x_mppi = x_bin + 0.10
+    y_mppi = (y_bin - 0.15) + 0.10 * (1.0 if y_bin >= 0.15 else -1.0)
     return x_mppi, y_mppi
 
 
@@ -116,11 +119,11 @@ def render_ee_trajectory_mppi(state: dict, bin_w: float, bin_d: float,
     obj_h = obj_size / 2
     wt = wall_thickness
 
-    # Bin extents in MPPI space
-    x_south = 0.10           # y_bin = 0
-    x_north = bin_d + 0.10   # y_bin = bin_d
-    y_west  = -0.25          # x_bin = 0 (left half)
-    y_east  = bin_w - 0.05   # x_bin = bin_w (right half)
+    # Bin extents in MPPI space (x_bin=NS, y_bin=EW after coordinate swap)
+    x_south = 0.10           # x_bin = 0  (NS = 0, south/exit boundary)
+    x_north = bin_d + 0.10   # x_bin = bin_d (NS = bin_d, north wall)
+    y_west  = -0.25          # y_bin = 0  (EW = 0, left half of robot gap)
+    y_east  = bin_w - 0.05   # y_bin = bin_w (EW = bin_w, right half)
 
     fig, ax = plt.subplots(figsize=(5.5, 4))
     ax.set_xlim(y_west - 0.04, y_east + 0.04)

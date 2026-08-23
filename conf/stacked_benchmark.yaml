@@ -14,9 +14,10 @@ verify_push_steps: 256   # null = same as push_steps; integer = use this for ver
 seed: 0
 n_runs: 20
 base_seed: 0          # run i uses seed = base_seed + i
-n_z_levels: 3
+stackable: true
+max_stack_height: 3
 target_z_level: 1  # null = floor; integer forces the target to that z level (0=floor, 1=stacked, ...)
-force_obstacle_on_target: true  # if true, one obstacle is placed on top of the target (requires n_z_levels > target_z_level + 1)
+force_obstacle_on_target: true  # if true, one obstacle is placed on top of the target (requires max_stack_height > target_z_level + 1)
 
 viewer: always
 

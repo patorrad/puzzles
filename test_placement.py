@@ -22,7 +22,7 @@ class TestTargetZLevelExplicit:
     def test_level0_always_floor(self):
         """target_z_level=0 always places target at floor height."""
         for seed in range(20):
-            state = random_initial_state(n_obstacles=2, obj_size=OBJ_SIZE, n_z_levels=2,
+            state = random_initial_state(n_obstacles=2, obj_size=OBJ_SIZE, max_stack_height=2, stackable=True,
                                          target_z_level=0, seed=seed)
             z = state['target_pos'][2].item()
             assert z == pytest.approx(OBJ_H, abs=1e-4), f"seed={seed}: got z={z}"
@@ -30,7 +30,7 @@ class TestTargetZLevelExplicit:
     def test_level1_height_and_xy_match_obstacle(self):
         """target_z_level=1 places target on top of an obstacle (same x,y)."""
         for seed in range(20):
-            state = random_initial_state(n_obstacles=1, obj_size=OBJ_SIZE, n_z_levels=2,
+            state = random_initial_state(n_obstacles=1, obj_size=OBJ_SIZE, max_stack_height=2, stackable=True,
                                          target_z_level=1, seed=seed)
             tz = state['target_pos'][2].item()
             assert tz == pytest.approx(LEVEL_Z[1], abs=1e-4), f"seed={seed}: got z={tz}"
@@ -45,7 +45,7 @@ class TestTargetZLevelExplicit:
     def test_level1_no_obstacles_falls_back_to_floor(self):
         """target_z_level=1 with no obstacles falls back to floor (no eligible column)."""
         for seed in range(10):
-            state = random_initial_state(n_obstacles=0, obj_size=OBJ_SIZE, n_z_levels=2,
+            state = random_initial_state(n_obstacles=0, obj_size=OBJ_SIZE, max_stack_height=2, stackable=True,
                                          target_z_level=1, seed=seed)
             z = state['target_pos'][2].item()
             assert z == pytest.approx(OBJ_H, abs=1e-4), f"seed={seed}: got z={z}"
@@ -57,7 +57,7 @@ class TestTargetZLevelExplicit:
         In either case the z must be a recognised level height."""
         valid_zs = [LEVEL_Z[0], LEVEL_Z[1]]
         for seed in range(30):
-            state = random_initial_state(n_obstacles=2, obj_size=OBJ_SIZE, n_z_levels=2,
+            state = random_initial_state(n_obstacles=2, obj_size=OBJ_SIZE, max_stack_height=2, stackable=True,
                                          target_z_level=1, seed=seed)
             tz = state['target_pos'][2].item()
             assert any(abs(tz - vz) < 1e-4 for vz in valid_zs), (
@@ -77,7 +77,7 @@ class TestTargetZLevelExplicit:
         """When an obstacle ends up at the target level but direct column placement
         failed, the swap mechanism must move the target to that level."""
         for seed in range(50):
-            state = random_initial_state(n_obstacles=2, obj_size=OBJ_SIZE, n_z_levels=2,
+            state = random_initial_state(n_obstacles=2, obj_size=OBJ_SIZE, max_stack_height=2, stackable=True,
                                          target_z_level=1, seed=seed)
             obs_at_level_1 = any(
                 abs(state['obstacle_pos'][i][2].item() - LEVEL_Z[1]) < 1e-4
@@ -93,18 +93,18 @@ class TestTargetZLevelExplicit:
 class TestTargetZLevelNone:
 
     def test_single_level_always_floor(self):
-        """With obj_size=OBJ_SIZE, n_z_levels=1, randomised target must land at floor."""
+        """With obj_size=OBJ_SIZE, max_stack_height=1, randomised target must land at floor."""
         for seed in range(20):
-            state = random_initial_state(n_obstacles=2, obj_size=OBJ_SIZE, n_z_levels=1,
+            state = random_initial_state(n_obstacles=2, obj_size=OBJ_SIZE, max_stack_height=1,
                                          target_z_level=None, seed=seed)
             z = state['target_pos'][2].item()
             assert z == pytest.approx(OBJ_H, abs=1e-4), f"seed={seed}: got z={z}"
 
     def test_two_levels_valid_z(self):
-        """With obj_size=OBJ_SIZE, n_z_levels=2, target z must be one of the two valid level heights."""
+        """With obj_size=OBJ_SIZE, max_stack_height=2, stackable=True, target z must be one of the two valid level heights."""
         valid = LEVEL_Z[:2]
         for seed in range(20):
-            state = random_initial_state(n_obstacles=1, obj_size=OBJ_SIZE, n_z_levels=2,
+            state = random_initial_state(n_obstacles=1, obj_size=OBJ_SIZE, max_stack_height=2, stackable=True,
                                          target_z_level=None, seed=seed)
             z = state['target_pos'][2].item()
             assert any(abs(z - vz) < 1e-4 for vz in valid), (
@@ -115,7 +115,7 @@ class TestTargetZLevelNone:
         """Target quaternion should always be identity regardless of z-level."""
         identity = torch.tensor([1.0, 0.0, 0.0, 0.0])
         for seed in range(10):
-            state = random_initial_state(n_obstacles=2, obj_size=OBJ_SIZE, n_z_levels=2,
+            state = random_initial_state(n_obstacles=2, obj_size=OBJ_SIZE, max_stack_height=2, stackable=True,
                                          target_z_level=None, seed=seed)
             assert torch.allclose(state['target_quat'], identity, atol=1e-6)
 
@@ -123,30 +123,30 @@ class TestTargetZLevelNone:
 class TestPlacementInvariants:
 
     def test_target_within_bin_bounds(self):
-        """Target x,y always within [margin, bin_w/d - margin]."""
+        """Target x (NS), y (EW) always within valid ranges."""
         for seed in range(50):
-            state = random_initial_state(n_obstacles=3, obj_size=OBJ_SIZE, n_z_levels=2,
+            state = random_initial_state(n_obstacles=3, obj_size=OBJ_SIZE, max_stack_height=2, stackable=True,
                                          target_z_level=None, seed=seed)
             tx, ty = state['target_pos'][0].item(), state['target_pos'][1].item()
-            assert MARGIN <= tx <= BIN_W - MARGIN, f"seed={seed}: tx={tx:.4f} out of bounds"
-            assert MARGIN <= ty <= BIN_D - MARGIN, f"seed={seed}: ty={ty:.4f} out of bounds"
+            assert MARGIN <= tx <= BIN_D - MARGIN, f"seed={seed}: tx(NS)={tx:.4f} out of bounds"
+            assert MARGIN <= ty <= BIN_W - MARGIN, f"seed={seed}: ty(EW)={ty:.4f} out of bounds"
 
     def test_obstacles_within_bin_bounds(self):
-        """All obstacle x,y within [margin, bin_w/d - margin]."""
+        """All obstacle x (NS), y (EW) within valid ranges."""
         for seed in range(50):
-            state = random_initial_state(n_obstacles=3, obj_size=OBJ_SIZE, n_z_levels=2,
+            state = random_initial_state(n_obstacles=3, obj_size=OBJ_SIZE, max_stack_height=2, stackable=True,
                                          target_z_level=None, seed=seed)
             for i in range(3):
                 ox = state['obstacle_pos'][i][0].item()
                 oy = state['obstacle_pos'][i][1].item()
-                assert MARGIN <= ox <= BIN_W - MARGIN, f"seed={seed} obs={i}: ox={ox:.4f} out of bounds"
-                assert MARGIN <= oy <= BIN_D - MARGIN, f"seed={seed} obs={i}: oy={oy:.4f} out of bounds"
+                assert MARGIN <= ox <= BIN_D - MARGIN, f"seed={seed} obs={i}: ox(NS)={ox:.4f} out of bounds"
+                assert MARGIN <= oy <= BIN_W - MARGIN, f"seed={seed} obs={i}: oy(EW)={oy:.4f} out of bounds"
 
     def test_no_same_column_same_z_overlaps(self):
         """No two objects share the same (x,y) column at the same z-height."""
         sep = OBJ_SIZE * 1.05
         for seed in range(50):
-            state = random_initial_state(n_obstacles=3, obj_size=OBJ_SIZE, n_z_levels=2,
+            state = random_initial_state(n_obstacles=3, obj_size=OBJ_SIZE, max_stack_height=2, stackable=True,
                                          target_z_level=None, seed=seed)
             all_pos = torch.cat([
                 state['obstacle_pos'],

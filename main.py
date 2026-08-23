@@ -50,30 +50,24 @@ logger = logging.getLogger(__name__)
 # Replay helpers
 # ---------------------------------------------------------------------------
 
-def _bin_to_mppi_local(pos: list) -> list:
-    """Convert a bin-env position to the MPPI-scene local (env-relative) frame.
+def _bin_to_target_frame(pos: list, target_pos: list) -> list:
+    """Convert a bin-frame position to target-relative frame.
 
-    Verified against all 4 block initial positions in scene.py _BLOCK_SPECS:
+    Both puzzles and MPC now use x=north-south/forward, y=east-west/lateral,
+    so this is a pure subtraction — no axis swap needed.
 
-        MPPI_X = bin_Y + 0.10
-        MPPI_Y = (bin_X - 0.15) + 0.10 * sign(bin_X - 0.15)
-        MPPI_Z = bin_Z + 0.810   (table top at 0.775 + 0.035 = 0.810)
-
-    The Y formula expands each block's lateral offset from the bin centre (0.15)
-    by an extra 0.10 m — matching the physical block placement in the MPPI scene
-    (see examples/ur16e_reach_stand_blocks/scene.py _BLOCK_SPECS).
+    At deploy time: abs_mpc_pos = observed_target_pos + offset.
     """
-    x, y, z = pos
-    mppi_x = y + 0.10
-    mppi_y = (x - 0.15) + 0.10 * (1.0 if x >= 0.15 else -1.0)
-    mppi_z = z + 0.810
-    return [mppi_x, mppi_y, mppi_z]
+    bx, by, bz = pos
+    tx, ty, tz = target_pos
+    return [bx - tx, by - ty, bz - tz]
 
 
 def _simulate_plan_steps(env, plan: list[dict], initial_state: dict) -> list[dict]:
     steps = []
     state = initial_state
     env.set_state(state)
+    target_initial = initial_state['target_pos'].tolist()
 
     for action in plan:
         obj_idx  = int(action['obj_idx'])
@@ -103,16 +97,14 @@ def _simulate_plan_steps(env, plan: list[dict], initial_state: dict) -> list[dic
         steps.append({
             'obj_idx':           obj_idx,
             'obj_name':          obj_name,
-            # Positions are converted from bin-env local to MPPI-scene local frame
-            # via _bin_to_mppi_local() so they match sim.get_object_pos() directly.
-            'coordinate_frame':  'isaaclab_local',
-            'start_pos':         _bin_to_mppi_local(start_pos),
+            'coordinate_frame':  'target',
+            'start_pos':         _bin_to_target_frame(start_pos, target_initial),
             'start_quat':        start_quat,
-            'end_pos':           _bin_to_mppi_local(end_pos),
+            'end_pos':           _bin_to_target_frame(end_pos, target_initial),
             'end_quat':          end_quat,
-            'target_start_pos':  _bin_to_mppi_local(target_start_pos),
+            'target_start_pos':  _bin_to_target_frame(target_start_pos, target_initial),
             'target_start_quat': target_start_quat,
-            'target_end_pos':    _bin_to_mppi_local(target_end_pos),
+            'target_end_pos':    _bin_to_target_frame(target_end_pos, target_initial),
             'target_end_quat':   target_end_quat,
         })
 
@@ -160,17 +152,21 @@ def save_solution(path: str, plan: list[dict], initial_state: dict,
                    [0.9, 0.2, 0.2], rho=50.0),
         *[make_actor(f'obstacle_{i}', [OBJ_SIZE]*3, pos.tolist(), [0.3, 0.5, 0.9])
           for i, pos in enumerate(initial_state['obstacle_pos'])],
-        make_actor('floor', [BIN_W+2*wt, BIN_D+2*wt, wt],
-                   [BIN_W/2, BIN_D/2, -wt/2], floor_color, fixed=True),
-        make_actor('wall_north', [BIN_W+2*wt, wt, BIN_H],
-                   [BIN_W/2, BIN_D+wt/2, BIN_H/2], wall_color, fixed=True),
-        make_actor('wall_west',  [wt, BIN_D, BIN_H],
-                   [-wt/2, BIN_D/2, BIN_H/2], wall_color, fixed=True),
-        make_actor('wall_east',  [wt, BIN_D, BIN_H],
-                   [BIN_W+wt/2, BIN_D/2, BIN_H/2], wall_color, fixed=True),
+        # Actor positions in bin-local frame: x=NS/forward, y=EW/lateral
+        make_actor('floor', [BIN_D+2*wt, BIN_W+2*wt, wt],
+                   [BIN_D/2, BIN_W/2, -wt/2], floor_color, fixed=True),
+        make_actor('wall_north', [wt, BIN_W+2*wt, BIN_H],
+                   [BIN_D+wt/2, BIN_W/2, BIN_H/2], wall_color, fixed=True),
+        make_actor('wall_west',  [BIN_D, wt, BIN_H],
+                   [BIN_D/2, -wt/2, BIN_H/2], wall_color, fixed=True),
+        make_actor('wall_east',  [BIN_D, wt, BIN_H],
+                   [BIN_D/2, BIN_W+wt/2, BIN_H/2], wall_color, fixed=True),
     ]
 
     data = {
+        # steps use "target" frame (x/y-swapped, target-relative offsets).
+        # initial_state and plan remain in bin frame for _do_replay().
+        'coordinate_frame': 'target',
         'env_config': {
             'BIN_W': BIN_W, 'BIN_D': BIN_D, 'BIN_H': BIN_H,
             'WALL_T': wt, 'OBJ_SIZE': OBJ_SIZE, 'OBJ_H': OBJ_H,
@@ -197,6 +193,7 @@ def save_solution(path: str, plan: list[dict], initial_state: dict,
 
 def _do_replay(cfg: DictConfig):
     """Load plan from file and replay with viewer. Called in a fresh process."""
+    from replay import run_replay
     with open(cfg.replay_file) as f:
         data = json.load(f)
 
@@ -207,35 +204,8 @@ def _do_replay(cfg: DictConfig):
         'obstacle_pos':  torch.tensor(data['initial_state']['obstacle_pos']),
         'obstacle_quat': torch.tensor(data['initial_state']['obstacle_quat']),
     }
-
     env = build_env(cfg, n_envs=1, viewer_mode='always')
-    env.set_state(initial_state)
-    if env.show_viewer:
-        input('Press Enter to start replay...')
-
-    done = False
-    for step_i, action in enumerate(plan):
-        atype = action['action_type']
-        logger.info('  Step %d/%d: [%s] obj %s pos %s z=%.3f',
-                    step_i + 1, len(plan), atype, action["obj_idx"],
-                    torch.round(action["push_pos"], decimals=3), action["push_z"])
-        if atype == 'push_n':
-            _, reward, done = env.execute_ns_push(action['push_pos'], action['push_z'])
-        elif atype == 'pull_s':
-            _, reward, done = env.execute_ns_pull(action['push_pos'], action['push_z'])
-        elif atype == 'push_e':
-            _, reward, done = env.execute_ew_push(action['push_pos'], action['push_z'], direction=+1)
-        else:
-            _, reward, done = env.execute_ew_push(action['push_pos'], action['push_z'], direction=-1)
-        logger.info('    -> reward=%.3f, done=%s', reward, done)
-        if done:
-            logger.info('  Target escaped the bin!')
-            break
-
-    if not done:
-        logger.info('  Plan executed (target may not have fully escaped).')
-    if env.show_viewer:
-        input('Press Enter to close viewer...')
+    run_replay(env, plan, initial_state)
 
 
 def _launch_replay(plan, initial_state, cfg: DictConfig):
@@ -263,7 +233,7 @@ def _launch_replay(plan, initial_state, cfg: DictConfig):
         f'simulator={cfg.simulator.name}',
         f'n_obstacles={cfg.n_obstacles}',
         f'friction={cfg.friction}',
-        f'n_z_levels={cfg.n_z_levels}',
+        f'max_stack_height={cfg.max_stack_height}',
         f'push_steps={cfg.push_steps}',
         f'substeps={cfg.substeps}',
         f'wall_thickness={cfg.wall_thickness}',
@@ -317,7 +287,7 @@ def main(cfg: DictConfig) -> None:
         from omegaconf import OmegaConf, open_dict
         sc = cfg.scenario
         with open_dict(cfg):
-            for key in ('n_obstacles', 'n_z_levels', 'target_z_level',
+            for key in ('n_obstacles', 'max_stack_height', 'target_z_level',
                         'stackable', 'difficult_spawn',
                         'bin_size', 'wall_thickness', 'friction'):
                 if key in sc:

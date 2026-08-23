@@ -62,7 +62,8 @@ from more.ppn import PPN, build_ppn
 
 def _build_env(sim: str, n_obs: int, n_envs: int,
                stackable: bool = False, n_z_levels: int = 1,
-               bin_size: float | None = None, difficult_spawn: bool = False):
+               bin_size: float | None = None, difficult_spawn: bool = False,
+               force_obstacle_on_target: bool = False):
     """Build a BinEnv by loading the project's Hydra YAML config files."""
     from omegaconf import OmegaConf
     from simulators import build_env
@@ -79,6 +80,7 @@ def _build_env(sim: str, n_obs: int, n_envs: int,
         'stackable':      stackable,
         'n_z_levels':     n_z_levels,
         'difficult_spawn': difficult_spawn,
+        'force_obstacle_on_target': force_obstacle_on_target,
         'seed':           None,
     }
     if bin_size is not None:
@@ -366,6 +368,8 @@ def _parse_args():
     p.add_argument('--n_envs',     type=int, default=8)
     p.add_argument('--difficult_spawn', action='store_true',
                    help='Use difficult initial spawn positions')
+    p.add_argument('--force_obstacle_on_target', action='store_true',
+                   help='Place one obstacle on top of the target (match alphazero_train.yaml)')
     p.add_argument('--stackable',  action='store_true',
                    help='Enable stackable objects (match alphazero_train.yaml)')
     p.add_argument('--n_z_levels', type=int, default=1,
@@ -405,7 +409,8 @@ def main():
             os.environ.setdefault('ISAACLAB_HEADLESS', '1')
         env = _build_env(args.sim, n_obs=args.n_obs, n_envs=args.n_envs,
                          stackable=args.stackable, n_z_levels=args.n_z_levels,
-                         bin_size=args.bin_size, difficult_spawn=args.difficult_spawn)
+                         bin_size=args.bin_size, difficult_spawn=args.difficult_spawn,
+                         force_obstacle_on_target=args.force_obstacle_on_target)
         cfg_c = CollectConfig(
             n_scenes=args.n_scenes,
             n_simulations=args.n_simulations,

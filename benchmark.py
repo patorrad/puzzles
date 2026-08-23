@@ -312,6 +312,12 @@ def main(cfg: DictConfig) -> None:
             replay_success = None
             force_traces = []
 
+        if cfg.get('collect_data_dir', None) and hasattr(planner, 'save_collected_data'):
+            data_path = os.path.join(cfg.collect_data_dir,
+                                     f'run_{i:03d}_seed_{seed}.pt')
+            planner.save_collected_data(data_path)
+            planner.collected_records.clear()
+
         log = {
             'run/success':           int(result.success),
             'run/verify_successes':  verify_successes,

@@ -100,8 +100,6 @@ class BinEnvIsaacGym(SimulatorEnv):
 
         _park_y = -(max(self.bin_w, self.bin_d) * 1.5 + 0.1)
         self._park = [self.bin_w / 2, _park_y, self._OBJ_H]
-        self.z_levels = [self._OBJ_H + i * self._OBJ_SIZE for i in range(n_z_levels)]
-
         # Number of actors per env: floor + 3 walls + 2 pushers + 1 target + n_obstacles
         self.n_actors_per_env = 7 + n_obstacles
 

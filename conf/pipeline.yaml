@@ -17,15 +17,20 @@ difficult_spawn: false
 # Override config.yaml defaults for isaaclabmpc compatibility
 wall_thickness: 0.02
 friction: 1.2
-parallel_envs: 8
-viewer: always
+parallel_envs: 128
+viewer: headless
 
 # Puzzle solver child process (null = wait indefinitely)
 puzzle_timeout_s: null
 
 # Single-scenario mode: skip generation, run puzzle planning + MPC on one YAML
 # Usage: python pipeline.py --config-name=pipeline scenario_file=conf/scenario/generated/scenario_0000.yaml
-scenario_file: null
+scenario_file: /home/jack/research/puzzles/conf/scenario/cube27.yaml
+
+# Server mode: pull env setup from the running planner instead of a YAML.
+# Usage: python pipeline.py --config-name=pipeline scenario_source=server
+scenario_source: null
+server_scenario_name: null
 
 # Resume mode: skip scenario generation + puzzle planning, run MPC only
 # Usage: python pipeline.py --config-name=pipeline resume=true resume_dir=outputs/<run_id>
@@ -35,8 +40,13 @@ resume_dir: null
 # IsaacLab MPC subprocesses
 isaaclabmpc_timeout_s: 300
 isaaclabmpc_n_steps: 10000
-isaaclabmpc_dir: /home/jack/research/isaaclabmpc/.claude/worktrees/cube27/examples/ur16e_reach_stand_blocks
-show_mpc_viewer: true  # set true to open the Isaac viewer for world.py
+# isaaclabmpc_dir: /home/jack/research/isaaclabmpc/examples/ur16e_reach_stand_blocks_jack
+isaaclabmpc_dir: /home/paolo/Documents/isaaclabmpc/examples/ur16e_stacked_robot
+show_mpc_planner_viewer: false  # open Isaac viewer during puzzle planning (planner.py / puzzle solver)
+show_mpc_world_viewer: true     # open Isaac viewer during MPC execution (world.py)
+
+# Video recording (IsaacLab only; requires omni.replicator — uses ISAACLAB_ENABLE_CAMERAS)
+record_video: true
 
 # Output / WandB
 output_dir: outputs

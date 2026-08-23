@@ -18,7 +18,7 @@ Three tests:
 
 Usage:
     conda run -n isaaclab_mpc python diagnose_reconstruction.py \
-        [--seed SEED] [--n_obstacles N] [--n_z_levels Z] [--n_envs E] \
+        [--seed SEED] [--n_obstacles N] [--n_envs E] \
         [--n_seeds S] [--n_steps STEPS]
 """
 
@@ -59,7 +59,7 @@ def _z_label(state: dict, obj_size: float) -> list[str]:
     return labels
 
 
-def _make_env(n_obstacles: int, n_envs: int, n_z_levels: int, seed: int | None):
+def _make_env(n_obstacles: int, n_envs: int, seed: int | None):
     """Build a BinEnvIsaacLab with sensible defaults for diagnostics."""
     from simulators.isaaclab_env import BinEnvIsaacLab
     obj_size = 0.05
@@ -71,7 +71,6 @@ def _make_env(n_obstacles: int, n_envs: int, n_z_levels: int, seed: int | None):
         show_viewer=False,
         seed=seed,
         stackable=False,
-        n_z_levels=n_z_levels,
         push_steps=128,
         substeps=4,
         wall_thickness=0.25,
@@ -134,7 +133,7 @@ def test_cross_env_variance(env, state: dict):
         'action_type': 'push_n',
         'obj_idx': 0,
         'push_pos': torch.tensor([cx, cy]),
-        'push_z':   env.z_levels[0],
+        'push_z':   env._OBJ_H,
     }
     pairs = [(state, action)] * n_envs
 
@@ -180,7 +179,7 @@ def test_sequential_noise(env, state: dict, n_steps: int):
         'action_type': 'push_n',
         'obj_idx': 0,
         'push_pos': torch.tensor([cx, cy]),
-        'push_z':   env.z_levels[0],
+        'push_z':   env._OBJ_H,
     }
 
     print(f'\n  Sequential noise over {n_steps} push steps (same action each time):')
@@ -216,7 +215,6 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--seed',        type=int, default=42)
     parser.add_argument('--n_obstacles', type=int, default=3)
-    parser.add_argument('--n_z_levels',  type=int, default=2)
     parser.add_argument('--n_envs',      type=int, default=128)
     parser.add_argument('--n_seeds',     type=int, default=3,
                         help='Number of different initial placements to test')
@@ -228,14 +226,13 @@ def main():
 
     settle_counts = [0, 2, 5, 10, 20, 50, 100, 1000]
 
-    print(f'Building env: n_obstacles={args.n_obstacles}, '
-          f'n_z_levels={args.n_z_levels}, n_envs={args.n_envs}')
-    env = _make_env(args.n_obstacles, args.n_envs, args.n_z_levels, args.seed)
+    print(f'Building env: n_obstacles={args.n_obstacles}, n_envs={args.n_envs}')
+    env = _make_env(args.n_obstacles, args.n_envs, args.seed)
 
     for s in range(args.n_seeds):
         seed = args.seed + s
         print(f'\n{"="*70}')
-        print(f'Seed {seed} | n_obstacles={args.n_obstacles} | n_z_levels={args.n_z_levels}')
+        print(f'Seed {seed} | n_obstacles={args.n_obstacles}')
         print('='*70)
 
         torch.manual_seed(seed)

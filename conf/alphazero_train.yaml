@@ -4,7 +4,7 @@ defaults:
   - _self_
 
 # Environment knobs (passed to build_env)
-n_obstacles: 10
+n_obstacles: 5
 bin_size: 0.4
 bin_size_factor: 1
 stackable: true
@@ -12,16 +12,16 @@ difficult_spawn: true
 friction: 1.0
 obj_size: 0.05
 obstacle_shapes: null  # null=all cubes; list e.g. [L,T,S,Z,I,O,J,cube]; available: cube I O T S Z L J
-n_z_levels: 2
+n_z_levels: 3
 target_z_level: null
-force_obstacle_on_target: false
+force_obstacle_on_target: true
 push_steps: 256
 substeps: 4
 wall_thickness: 0.25
 parallel_envs: 1
 seed: 0
 debug: false
-viewer: headless
+viewer: headless #always / replay / headless
 
 # Training
 net_arch: mlp   # 'mlp' | 'resnet' | 'transformer' | 'deepsets' (transformer/deepsets solver-only; stacker falls back to resnet)
@@ -33,7 +33,7 @@ buffer_size: 50000
 lr: 1.0e-3
 weight_decay: 1.0e-4
 checkpoint_every: 10
-output_dir: outputs/10obs_stacked2_difficult/n_sim_sol200_nn1024_random_stacker_10obs_stacked2_difficult
+output_dir: outputs/5obs_stacked3_diff_bottom/n_sim_sol200_nn1024_random_stacker_5obs_stacked3_diff_bottom
 device: cuda # For neural network
 use_wandb: true
 log_video: true   # capture a self-play replay video at every checkpoint and upload to wandb (isaaclab only)

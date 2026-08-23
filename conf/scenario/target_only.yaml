@@ -1,0 +1,11 @@
+n_obstacles: 0
+bin_size: 0.3
+
+# Single target at bin centre, no obstacles.
+# Used by test_smoke.py to verify that a pull_s action moves the target
+# southward and triggers the exit condition.
+# pos = [NS/forward, EW/lateral, z]
+initial_state:
+  target_pos: [0.15, 0.15, 0.025]
+  target_quat: [1.0, 0.0, 0.0, 0.0]
+  obstacles: []

@@ -113,6 +113,7 @@ class MOREPlanner:
             c_uct=c_uct,
             k_per_object=k_per_object,
         )
+        self.collected_records: list[dict] = []
 
     # ------------------------------------------------------------------
     # Planner protocol
@@ -136,6 +137,7 @@ class MOREPlanner:
                 break
 
             action = self.tree.search(state, self.n_simulations)
+            self._collect_tree_data()
             if action is None:
                 if verbose:
                     _log(f'  MORE: no action found at step {step}, stopping.')
@@ -201,6 +203,23 @@ class MOREPlanner:
                  f'avg_reward={avg_reward:.3f}, t={elapsed:.1f}s).')
         self._last_verify = (successes, avg_reward, n_tries)
         return plan
+
+    # ------------------------------------------------------------------
+    # Data collection helpers
+    # ------------------------------------------------------------------
+
+    def _collect_tree_data(self) -> None:
+        """Walk the last search tree and append training-format records."""
+        root = self.tree.last_root
+        if root is None:
+            return
+        self.collected_records.extend(self.tree.collect_transitions(root))
+
+    def save_collected_data(self, path: str) -> None:
+        import torch, os
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        torch.save(self.collected_records, path)
+        print(f'[MORE] Collected data saved → {path} ({len(self.collected_records):,} records)')
 
     def verify(self, plan: list[dict], initial_state: dict,
                verbose: bool = True) -> tuple[int, float, float, bool, list]:
