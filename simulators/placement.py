@@ -167,6 +167,7 @@ def random_initial_state(
     n_z_levels: int = 1,
     target_z_level: Optional[int] = None,
     force_obstacle_on_target: bool = False,
+    force_obstacle_on_target_prob: float = 1.0,
     obj_height: Optional[float] = None,
 ) -> dict:
     """
@@ -210,13 +211,18 @@ def random_initial_state(
     if seed is not None:
         torch.manual_seed(seed)
 
+    # Decide once per episode whether force_obstacle_on_target actually applies
+    # this time, rather than every episode, so training still sees the
+    # un-forced case at the given rate.
+    apply_force = force_obstacle_on_target and (torch.rand(1).item() < force_obstacle_on_target_prob)
+
     attempts = max_attempts if difficult_spawn else 1
     state = None
     for attempt in range(attempts):
         state = _place_objects_once(n_obstacles, stackable, difficult_spawn, bin_w, bin_d,
                                     obj_size, n_z_levels,
                                     target_z_level=target_z_level,
-                                    force_obstacle_on_target=force_obstacle_on_target,
+                                    force_obstacle_on_target=apply_force,
                                     obj_height=obj_height)
         if not difficult_spawn:
             return state

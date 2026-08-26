@@ -75,6 +75,8 @@ class MpcResult:
     block_positions_final: list | None = None
     step_completion_events: list | None = None
     mppi_cost_history: list | None = None
+    target_exited: bool = False
+    intruder_exited: bool = False
 
 
 # ---------------------------------------------------------------------------

@@ -14,11 +14,13 @@ scenario_dir: null
 max_solutions: null
 
 # IsaacLab MPC subprocesses
-isaaclabmpc_dir: /home/paolo/Documents/isaaclabmpc/examples/ur16e_stacked_robot
-isaaclabmpc_timeout_s: 300
+isaaclabmpc_dir: /home/paolo/Documents/isaaclabmpc/examples/ur16e_stacked_robot_sim
+solution_timeout_s: 300       # per-solution wall-clock timeout (5 min)
+isaaclabmpc_timeout_s: 6000   # total global timeout = 5 min x 20 solutions
 isaaclabmpc_n_steps: 10000
 show_mpc_planner_viewer: false
 show_mpc_world_viewer: true
+save_video: false
 
 # Scene geometry (used for wandb visualisation only; not passed to isaaclabmpc)
 bin_size: 0.4

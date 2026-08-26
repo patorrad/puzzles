@@ -63,6 +63,7 @@ class SimulatorEnv(ABC):
                  debug: bool = False,
                  target_z_level: Optional[int] = None,
                  force_obstacle_on_target: bool = False,
+                 force_obstacle_on_target_prob: float = 1.0,
                  viewer_mode: str = 'replay'):
         self._OBJ_SIZE = obj_size
         self.n_obstacles = n_obstacles
@@ -75,6 +76,7 @@ class SimulatorEnv(ABC):
         self.n_z_levels = n_z_levels
         self.target_z_level = target_z_level
         self.force_obstacle_on_target = force_obstacle_on_target
+        self.force_obstacle_on_target_prob = force_obstacle_on_target_prob
         self.push_steps = push_steps
         self.substeps = substeps
         self.wall_thickness = wall_thickness

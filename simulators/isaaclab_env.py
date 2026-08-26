@@ -179,6 +179,7 @@ class BinEnvIsaacLab(SimulatorEnv):
                  debug: bool = False,
                  target_z_level: int | None = None,
                  force_obstacle_on_target: bool = False,
+                 force_obstacle_on_target_prob: float = 1.0,
                  viewer_mode: str = 'replay'):
         if not ISAACLAB_AVAILABLE:
             raise ImportError(
@@ -207,6 +208,7 @@ class BinEnvIsaacLab(SimulatorEnv):
             obj_size=obj_size,
             debug=debug, target_z_level=target_z_level,
             force_obstacle_on_target=force_obstacle_on_target,
+            force_obstacle_on_target_prob=force_obstacle_on_target_prob,
             viewer_mode=viewer_mode,
         )
 
@@ -772,29 +774,37 @@ class BinEnvIsaacLab(SimulatorEnv):
             n_z_levels=self.n_z_levels,
             target_z_level=self.target_z_level,
             force_obstacle_on_target=self.force_obstacle_on_target,
+            force_obstacle_on_target_prob=self.force_obstacle_on_target_prob,
             obj_height=self._OBJ_H,
         )
 
         env_ids = torch.tensor([0], device=self.device, dtype=torch.long)
 
-        # Place obstacles first, then target; settle after each so PhysX
-        # commits each teleport before the next object is inserted.
-        for i in range(self.n_obstacles):
-            pos_w  = torch.tensor(self._local_to_world(state['obstacle_pos'][i].tolist(), 0),
-                                  device=self.device).unsqueeze(0)
-            quat_t = torch.tensor(list(_IDENTITY_QUAT), device=self.device).unsqueeze(0)
-            vel_t  = torch.zeros(1, 6, device=self.device)
-            obs_state = torch.cat([pos_w, quat_t, vel_t], dim=-1).unsqueeze(0)
-            self.obstacle_collection.write_object_state_to_sim(
-                obs_state, env_ids=env_ids,
-                object_ids=torch.tensor([i], device=self.device),
-            )
+        # Teleport obstacles and the target in a single ascending-z order
+        # (rather than "all obstacles, then target") so that whatever object
+        # an object rests on — another obstacle, a stack, or the target
+        # itself when force_obstacle_on_target places one above it — is
+        # always settled in place before the resting object lands on it.
+        order = sorted(
+            [('obstacle', i, state['obstacle_pos'][i][2].item()) for i in range(self.n_obstacles)]
+            + [('target', 0, state['target_pos'][2].item())],
+            key=lambda t: t[2],
+        )
+        for kind, i, _z in order:
+            if kind == 'obstacle':
+                pos_w  = torch.tensor(self._local_to_world(state['obstacle_pos'][i].tolist(), 0),
+                                      device=self.device).unsqueeze(0)
+                quat_t = torch.tensor(list(_IDENTITY_QUAT), device=self.device).unsqueeze(0)
+                vel_t  = torch.zeros(1, 6, device=self.device)
+                obs_state = torch.cat([pos_w, quat_t, vel_t], dim=-1).unsqueeze(0)
+                self.obstacle_collection.write_object_state_to_sim(
+                    obs_state, env_ids=env_ids,
+                    object_ids=torch.tensor([i], device=self.device),
+                )
+            else:
+                self._set_pose(self.target_obj, state['target_pos'].tolist(), _IDENTITY_QUAT, env_ids)
             for _ in range(10):
                 self._step_sim(render=self.show_viewer)
-
-        self._set_pose(self.target_obj, state['target_pos'].tolist(), _IDENTITY_QUAT, env_ids)
-        for _ in range(10):
-            self._step_sim(render=self.show_viewer)
 
         self._park_pushers(env_ids)
 
@@ -918,6 +928,7 @@ class BinEnvIsaacLab(SimulatorEnv):
                     n_z_levels=self.n_z_levels,
                     target_z_level=self.target_z_level,
                     force_obstacle_on_target=self.force_obstacle_on_target,
+                    force_obstacle_on_target_prob=self.force_obstacle_on_target_prob,
                     obj_height=self._OBJ_H,
                 )
                 initial = {k: v.to(self.device) for k, v in initial.items()}
