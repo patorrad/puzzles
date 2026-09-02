@@ -67,7 +67,7 @@ class MOREPlanner:
     k_per_object : int
         Contour push samples per object per expansion step.
     verify_threshold : float
-    min_verify_envs : int
+    n_verify_runs : int
     seed : int | None
     """
 
@@ -83,14 +83,14 @@ class MOREPlanner:
                  m: int = 3,
                  c_uct: float = 2.0,
                  verify_threshold: float = 0.0,
-                 min_verify_envs: int = 16,
+                 n_verify_runs: int = 16,
                  verify_push_steps: int | None = None,
                  seed: int | None = 42):
         self.env = env
         self.n_simulations = n_simulations
         self.n_plan_steps = n_plan_steps
         self.verify_threshold = verify_threshold
-        self.min_verify_envs = min_verify_envs
+        self.n_verify_runs = n_verify_runs
         self.verify_push_steps = verify_push_steps
         self.batch_size = max(1, env.n_envs)
 
@@ -186,7 +186,7 @@ class MOREPlanner:
         ctx = (self.env.push_steps_ctx(self.verify_push_steps)
                if hasattr(self.env, 'push_steps_ctx') else _NullCtx())
         with ctx:
-            n_tries = self.min_verify_envs
+            n_tries = self.n_verify_runs
             successes, avg_reward, _ = _verify_plan(
                 self.env, plan, copy.deepcopy(initial_state),
                 n_tries, verbose=verbose, pause=pause_before_verify)
@@ -226,7 +226,7 @@ class MOREPlanner:
         ctx = (self.env.push_steps_ctx(self.verify_push_steps)
                if hasattr(self.env, 'push_steps_ctx') else _NullCtx())
         with ctx:
-            n_tries = self.min_verify_envs
+            n_tries = self.n_verify_runs
             successes, avg_reward, goal_flags = _verify_plan(
                 self.env, plan, copy.deepcopy(initial_state),
                 n_tries, verbose=verbose)

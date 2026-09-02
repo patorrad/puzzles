@@ -171,3 +171,11 @@ EXIT_Y = -0.05  # target escapes when y < EXIT_Y
 - Genesis 0.3.11
 - NumPy, PyTorch
 - Conda env: `genesistest2`
+
+<!-- Now it's fully clear. parallel_envs: 1 and min_verify_envs: 16 — so it's 16 sequential single-env runs, not 16 parallel slots. The print is a bug: the denominator uses env.n_envs (=1) instead of min_verify_envs (=16), so it displays 16/1 but the rate math (successes / self.min_verify_envs) is correct.
+
+Each of the 16 runs does a full deterministic reset — positions, quaternions, zero_all_dofs_velocity() — so every run starts from byte-identical state. There are no spatial offsets (single env slot, not parallel), no friction sampling, no noise injection anywhere.
+
+The variance you see in the wandb fraction plots is therefore pure GPU floating-point nondeterminism across sequential identical calls: CUDA contact detection and collision resolution use parallel reductions whose operand ordering is not guaranteed to be consistent between kernel launches. The same pusher trajectory from the same starting state produces slightly different object positions depending on which GPU warps happen to process which contacts in which order.
+
+Bottom line: verify_rate is measuring how often the simulator agrees with itself across repeated identical calls. It has no connection to physical robustness — it doesn't tell you anything about what happens if friction varies by ±10% or the pusher has positioning error. A plan that scores 15/16 isn't "robust to noise"; it's just hitting a CUDA nondeterminism edge case. -->

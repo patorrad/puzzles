@@ -21,6 +21,7 @@ import matplotlib.ticker as mticker
 
 def load_results(results_dir: str) -> pd.DataFrame:
     dfs = []
+    
     for path in sorted(Path(results_dir).iterdir()):
         if not path.is_file():
             continue

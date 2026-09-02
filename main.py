@@ -342,7 +342,7 @@ def main(cfg: DictConfig) -> None:
             temperature=cfg.planner.temperature,
             seed=cfg.seed,
             verify_threshold=cfg.verify_threshold,
-            min_verify_envs=cfg.min_verify_envs,
+            n_verify_runs=cfg.n_verify_runs,
             verify_push_steps=cfg.verify_push_steps,
         )
         plan = planner.plan(initial_state, verbose=True,

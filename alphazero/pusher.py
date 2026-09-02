@@ -42,7 +42,7 @@ class AlphaZeroPusher:
                  n_simulations: int = 50, max_depth: int = 10,
                  c_puct: float = 1.5, temperature: float = 1e-3,
                  seed: int | None = 42, verify_threshold: float = 0.75,
-                 min_verify_envs: int = 16,
+                 n_verify_runs: int = 16,
                  verify_push_steps: int | None = None):
         self.env = env
         self.n_simulations = n_simulations
@@ -51,7 +51,7 @@ class AlphaZeroPusher:
         self.temperature = temperature
         self.seed = seed
         self.verify_threshold = verify_threshold
-        self.min_verify_envs = min_verify_envs
+        self.n_verify_runs = n_verify_runs
         self.verify_push_steps = verify_push_steps
         self.batch_size = max(1, env.n_envs)
 
@@ -114,10 +114,10 @@ class AlphaZeroPusher:
         if not plan:
             return None
 
-        # Verify against multiple envs (same as MCTSPusher does for goal nodes)
+        # Single-run gate check inside plan(); benchmark.py does the full n_verify_runs check separately.
         from planner import _verify_plan  # reuse existing verifier
         with self.env.push_steps_ctx(self.verify_push_steps) if hasattr(self.env, 'push_steps_ctx') else _NullCtx():
-            n_tries = self.min_verify_envs
+            n_tries = 1
             successes, avg_reward, goal_flags = _verify_plan(
                 self.env, plan, copy.deepcopy(initial_state), n_tries,
                 verbose=verbose, pause=pause_before_verify)

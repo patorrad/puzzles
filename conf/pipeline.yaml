@@ -9,7 +9,7 @@ planner:
 # Scenario generation
 n_scenarios: 10
 n_obstacles: 3
-bin_size: 0.3
+bin_size: 0.4
 seed: 42
 stackable: false
 difficult_spawn: false
@@ -22,6 +22,10 @@ viewer: headless
 
 # Puzzle solver child process (null = wait indefinitely)
 puzzle_timeout_s: null
+
+# CSV output — same column schema as benchmark.py, so files from both can be
+# combined for plot_results.py. Set to a path like "results/pipeline_run" to enable.
+csv_path: results_real_robot.csv
 
 # Single-scenario mode: skip generation, run puzzle planning + MPC on one YAML
 # Usage: python pipeline.py --config-name=pipeline scenario_file=conf/scenario/generated/scenario_0000.yaml
@@ -38,7 +42,7 @@ resume: false
 resume_dir: null
 
 # IsaacLab MPC subprocesses
-isaaclabmpc_timeout_s: 300
+isaaclabmpc_timeout_s: 1000
 isaaclabmpc_n_steps: 10000
 # isaaclabmpc_dir: /home/jack/research/isaaclabmpc/examples/ur16e_reach_stand_blocks_jack
 isaaclabmpc_dir: /home/paolo/Documents/isaaclabmpc/examples/ur16e_stacked_robot
@@ -49,7 +53,7 @@ show_mpc_world_viewer: true     # open Isaac viewer during MPC execution (world.
 record_video: true
 
 # Output / WandB
-output_dir: outputs
+output_dir: results_real_robot
 wandb_project: bin-clearing-pipeline
 wandb_entity: null
 wandb_run_name: null

@@ -59,6 +59,15 @@ class PuzzleResult:
     total_pairs: int
     plan_time_s: float
     verify_rate: float = 0.0
+    verify_successes: int | None = None
+    verify_passed: bool | None = None
+    verify_std: float | None = None
+    network_forward_passes: int | None = None
+    budget_cap: int | None = None
+    total_push_distance: float | None = None
+    total_object_displacement: float | None = None
+    n_objects_moved: int | None = None
+    objects_displaced_from_bin: int | None = None
     final_reward: float | None = None
     reward_components: dict | None = None
     replay_success: bool | None = None
@@ -100,6 +109,7 @@ def _puzzle_worker(cfg: DictConfig, scenarios: list, out_dir: Path, q) -> None:
 
     from simulators import build_env
     from main import save_solution
+    from benchmark import _compute_push_distance, _compute_object_metrics
 
     out_dir = Path(out_dir)
     if record_video:
@@ -116,6 +126,8 @@ def _puzzle_worker(cfg: DictConfig, scenarios: list, out_dir: Path, q) -> None:
     for i, (scenario_name, initial_state) in enumerate(scenarios):
         seed = (cfg.seed + i) if cfg.seed is not None else i
         if planner_viewer_mode != 'headless' and hasattr(env, 'wait_for_input'):
+            n_obs = len(initial_state['obstacle_pos'])
+            print(f'  Scene: 1 target + {n_obs} obstacle(s) + 1 bin = {n_obs + 2} tracked objects')
             env.set_state(initial_state, env_idx=0)
             env.sim.step(render=True)
             env.wait_for_input(f'  [Scenario {i + 1}/{cfg.n_scenarios}: {scenario_name}] Press Enter to start MCTS rollouts …')
@@ -126,6 +138,11 @@ def _puzzle_worker(cfg: DictConfig, scenarios: list, out_dir: Path, q) -> None:
             result.reward_components = env.compute_reward_components(final_state)
             result.final_reward = sum(result.reward_components.values())
             result.replay_success = env.is_goal(final_state)
+            result.total_push_distance = _compute_push_distance(plan, env)
+            (result.total_object_displacement,
+             result.n_objects_moved,
+             result.objects_displaced_from_bin) = _compute_object_metrics(
+                initial_state, final_state, env)
 
             if planner_viewer_mode != 'headless':
                 env.replay(plan, initial_state)
@@ -250,6 +267,65 @@ def _get_final_state(env, plan, initial_state):
     return state, force_traces
 
 
+def _puzzle_result_to_csv_row(result: PuzzleResult, cfg: DictConfig) -> dict:
+    """Same column schema as benchmark.py's csv_rows, so results from both
+    scripts can be combined (e.g. for plot_results.py)."""
+    return {
+        'seed':                       result.seed,
+        'scenario_name':              result.scenario_name,
+        'planner':                    cfg.planner.name,
+        'wandb_run_name':             wandb.run.name if wandb.run else None,
+        'success':                    int(result.success),
+        'plan_length':                result.plan_length,
+        'plan_time_s':                result.plan_time_s,
+        'batch_calls':                result.batch_calls,
+        'total_pairs':                result.total_pairs,
+        'simulator_calls':            result.total_pairs,
+        'network_forward_passes':     result.network_forward_passes,
+        'budget_cap':                 result.budget_cap,
+        'plan_horizon_pre_filter':    result.plan_length,
+        'plan_horizon_post_filter':   result.plan_length,
+        'total_push_distance':        result.total_push_distance,
+        'total_object_displacement':  result.total_object_displacement,
+        'n_objects_moved':            result.n_objects_moved,
+        'objects_displaced_from_bin': result.objects_displaced_from_bin,
+        'verify_successes':           result.verify_successes,
+        'verify_rate':                result.verify_rate,
+        'verify_passed':              (int(result.verify_passed)
+                                       if result.verify_passed is not None else None),
+        'verify_std':                 result.verify_std,
+    }
+
+
+def _mpc_result_to_csv_fields(result: 'MpcResult') -> dict:
+    """MPC-execution columns merged onto the same row as the puzzle-planning
+    metrics for that scenario, so one CSV row covers plan + execution."""
+    return {
+        'mpc_success':          int(result.success),
+        'mpc_steps_completed':  result.steps_completed,
+        'mpc_total_steps':      result.total_steps,
+        'mpc_elapsed_time_s':   result.elapsed_time_s,
+    }
+
+
+def _write_csv_rows(csv_rows: list[dict], csv_path: str) -> None:
+    """Append rows to csv_path, matching benchmark.py's write-header-if-new logic.
+
+    Fieldnames are the ordered union of keys across all rows (not just the
+    first row's) since MPC fields may only be merged onto some rows.
+    """
+    import csv
+    fieldnames = list(dict.fromkeys(k for row in csv_rows for k in row.keys()))
+    write_header = not Path(csv_path).exists()
+    with open(csv_path, 'a', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
+        if write_header:
+            writer.writeheader()
+        writer.writerows(csv_rows)
+    print(f'[pipeline] CSV written → {csv_path} ({len(csv_rows)} rows, '
+          f'{"new file" if write_header else "appended"})')
+
+
 def _plan_scenario(env, cfg: DictConfig, scenario_idx: int, scenario_name: str,
                    initial_state: dict, seed: int) -> tuple[PuzzleResult, list | None]:
     """Run one planning attempt. Returns (PuzzleResult, plan_or_None)."""
@@ -282,8 +358,13 @@ def _plan_scenario(env, cfg: DictConfig, scenario_idx: int, scenario_name: str,
     if not success:
         return result, None
 
-    verify_successes, _, verify_rate, verify_passed, _ = planner.verify(plan, initial_state)
+    verify_successes, _, verify_rate, verify_passed, verify_flags = planner.verify(plan, initial_state)
     result.verify_rate = verify_rate
+    result.verify_successes = verify_successes
+    result.verify_passed = verify_passed
+    result.verify_std = float(np.std(verify_flags)) if verify_flags else None
+    result.network_forward_passes = getattr(planner, 'network_forward_passes', None)
+    result.budget_cap = getattr(cfg.planner, 'n_simulations', None)
     print(f'  Verify: {verify_successes}/{env.n_envs} ({verify_rate:.0%}) — '
           f'{"PASS" if verify_passed else "FAIL"}')
 
@@ -422,6 +503,8 @@ def _run_isaaclabmpc(scenario_name: str, scenario_yaml: Path, solution_json: Pat
     ilab_dir = Path(cfg.isaaclabmpc_dir)
     # Resolve all paths to absolute before passing to subprocesses, which run
     # with a different cwd (ilab_dir.parent.parent).
+    if scenario_yaml is not None:
+        scenario_yaml = scenario_yaml.resolve()
     solution_json  = solution_json.resolve()
     result_json    = (out_dir / 'isaaclabmpc_results' / f'{scenario_name}.json').resolve()
     telemetry_json = (out_dir / 'telemetry' / f'{scenario_name}_planner.json').resolve()
@@ -543,7 +626,7 @@ def _run_isaaclabmpc(scenario_name: str, scenario_yaml: Path, solution_json: Pat
 
 
 def _run_real_robot_scenario(scenario_name: str, out_dir: Path,
-                              cfg: DictConfig) -> tuple['MpcResult', dict | None]:
+                              cfg: DictConfig) -> tuple['MpcResult', dict | None, 'PuzzleResult | None']:
     """Real-robot mode: launch bridge_server.py as a subprocess so the bridge
     node can connect, read object state via zerorpc client, run puzzle planning,
     inject solution, then leave the server running."""
@@ -576,7 +659,7 @@ def _run_real_robot_scenario(scenario_name: str, out_dir: Path,
         print(f'[real-robot] ERROR: {e}')
         server_proc.kill()
         return MpcResult(scenario_name=scenario_name, success=False,
-                         steps_completed=0, total_steps=0, elapsed_time_s=0.0), None
+                         steps_completed=0, total_steps=0, elapsed_time_s=0.0), None, None
 
     import zerorpc as _zerorpc
     client = _zerorpc.Client(timeout=10, heartbeat=None)
@@ -601,21 +684,55 @@ def _run_real_robot_scenario(scenario_name: str, out_dir: Path,
         print('[real-robot] ERROR: no object poses received from bridge node within timeout')
         server_proc.kill()
         return MpcResult(scenario_name=scenario_name, success=False,
-                         steps_completed=0, total_steps=0, elapsed_time_s=0.0), None
+                         steps_completed=0, total_steps=0, elapsed_time_s=0.0), None, None
 
     n_objects = raw_poses.numel() // 7
 
-    def _world_to_bin(wp):
-        # MPPI world frame → bin-local (x=NS/forward, y=EW/lateral).
-        # Exit faces camera (+MPPI_x), so NS = BIN_D - (MPPI_x - BIN_OFF_X).
-        # Offsets are empirical — re-measure after repositioning the bin.
-        BIN_D = 0.27
-        return [ (wp[0] - 0.35), wp[1] - 0.14, wp[2] - 1.225]
+    # Print all received MPPI positions so we can verify the tracker.
+    print(f'[real-robot] {n_objects} total objects from server:')
+    for i in range(n_objects):
+        p = raw_poses[i * 7: i * 7 + 3].tolist()
+        label = 'bin-tracker' if i == n_objects - 1 else f'object[{i}]'
+        print(f'  {label}: MPPI=[{p[0]:.4f}, {p[1]:.4f}, {p[2]:.4f}]')
 
-    positions_bin = [_world_to_bin(raw_poses[i * 7: i * 7 + 3].tolist()) for i in range(n_objects)]
-    quats         = [raw_poses[i * 7 + 3: i * 7 + 7].tolist()            for i in range(n_objects)]
-    n_obs = n_objects - 1
-    print(f'[real-robot] {n_objects} objects received ({n_obs} obstacles)')
+    # Last object is the bin tracker — marks the center of the back wall in MPPI world frame.
+    bin_tracker_pos = raw_poses[(n_objects - 1) * 7: (n_objects - 1) * 7 + 3].tolist()
+    n_puzzle_objects = n_objects - 1  # cube objects only, excluding bin tracker
+
+    bin_s = cfg.get('bin_size', 0.4)
+    # Back wall center: MPPI x = x0 + bin_s, MPPI y = y0 + bin_s/2
+    x0 = bin_tracker_pos[0] - bin_s        # MPPI x at exit side (EW=0 in bin frame)
+    y0 = bin_tracker_pos[1] - bin_s / 2    # MPPI y at NS=0 in bin frame
+    bin_center = [x0 + bin_s / 2, y0 + bin_s / 2]
+    print(f'[real-robot] bin_s={bin_s}  tracker=[{bin_tracker_pos[0]:.4f}, {bin_tracker_pos[1]:.4f}]'
+          f'  x0={x0:.4f}  y0={y0:.4f}  bin_center={[round(v,4) for v in bin_center]}')
+
+    def _world_to_bin(wp):
+        # Pure translation — matches simulators/isaaclab_env.py's own bin-local
+        # convention ("Bin placed with NS along world x, EW along world y.
+        # No axis swap."), which is what the puzzle solver's _is_goal() check
+        # actually depends on. Do not add an axis swap or quaternion rotation
+        # here without re-deriving against that reference.
+        return [wp[0] - x0, wp[1] - y0, wp[2] - 1.225]
+
+    positions_bin = [_world_to_bin(raw_poses[i * 7: i * 7 + 3].tolist()) for i in range(n_puzzle_objects)]
+    quats         = [raw_poses[i * 7 + 3: i * 7 + 7].tolist() for i in range(n_puzzle_objects)]
+    n_obs = n_puzzle_objects - 1
+
+    print(f'[real-robot] {n_puzzle_objects} puzzle objects — bin-frame positions (should be in [0, {bin_s}]):')
+    for i, pos in enumerate(positions_bin):
+        ok = all(0 <= pos[j] <= bin_s for j in range(2))
+        label = 'target' if i == 0 else f'obstacle[{i-1}]'
+        flag = '' if ok else '  *** OUTSIDE BIN ***'
+        print(f'  {label}: [{pos[0]:.4f}, {pos[1]:.4f}, {pos[2]:.4f}]{flag}')
+
+    # Clamp x/y to [0, bin_s]: objects within noise-tolerance of a wall are snapped inside.
+    # Real-robot mode uses actual bin-frame positions — no centre-shift (which would
+    # push interior obstacles outside the opposite wall when the target is near the exit).
+    eps = 1e-3
+    for pos in positions_bin:
+        pos[0] = float(max(eps, min(bin_s - eps, pos[0])))
+        pos[1] = float(max(eps, min(bin_s - eps, pos[1])))
 
     initial_state = {
         'target_pos':    torch.tensor(positions_bin[0]),
@@ -623,19 +740,6 @@ def _run_real_robot_scenario(scenario_name: str, out_dir: Path,
         'obstacle_pos':  torch.tensor(positions_bin[1:]),
         'obstacle_quat': torch.tensor(quats[1:]),
     }
-
-    # Shift the whole scene so the target lands at bin centre (x-y only; z unchanged).
-    # Preserves relative layout of all objects.
-    bin_s   = cfg.get('bin_size', 0.3)
-    centre  = bin_s / 2
-    shift_x = centre - float(initial_state['target_pos'][0])
-    shift_y = centre - float(initial_state['target_pos'][1])
-    initial_state['target_pos'][0] += shift_x
-    initial_state['target_pos'][1] += shift_y
-    if initial_state['obstacle_pos'].numel() > 0:
-        initial_state['obstacle_pos'][:, 0] += shift_x
-        initial_state['obstacle_pos'][:, 1] += shift_y
-    print(f'[real-robot] centre-shifted scene by ({shift_x:+.4f}, {shift_y:+.4f}) m')
 
     obj_s    = cfg.get('obj_size', 0.05)
     bottom_z = obj_s / 2  # centre z of a cube resting on the floor
@@ -648,9 +752,11 @@ def _run_real_robot_scenario(scenario_name: str, out_dir: Path,
         initial_state['obstacle_pos'][:, 2] += shift_z
     print(f'[real-robot] z-shifted scene by {shift_z:+.4f} m (lowest object now at z={bottom_z:.4f})')
 
-    print(f'[real-robot] object states (bin frame) being passed to MCTS:')
-    print(f'  target   pos={[f"{v:.4f}" for v in positions_bin[0]]}  quat={[f"{v:.4f}" for v in quats[0]]}')
-    for i, (pos, quat) in enumerate(zip(positions_bin[1:], quats[1:])):
+    print(f'[real-robot] object states (bin frame, clamped) being passed to MCTS:')
+    print(f'  target   pos={[f"{v:.4f}" for v in initial_state["target_pos"].tolist()]}  quat={[f"{v:.4f}" for v in quats[0]]}')
+    for i in range(n_obs):
+        pos  = initial_state['obstacle_pos'][i].tolist()
+        quat = quats[i + 1]
         print(f'  obstacle {i} pos={[f"{v:.4f}" for v in pos]}  quat={[f"{v:.4f}" for v in quat]}')
 
     with open_dict(cfg):
@@ -679,11 +785,20 @@ def _run_real_robot_scenario(scenario_name: str, out_dir: Path,
     pq.close()
 
     solution_path = out_dir / 'solutions' / f'{scenario_name}.json'
-    if worker_result is None or not solution_path.exists():
-        print('[real-robot] puzzle planning failed — no solution injected')
+    puzzle_result = next(
+        (pr for pr in (worker_result or {}).get('puzzle_results', [])
+         if pr.scenario_name == scenario_name),
+        None,
+    )
+    if (worker_result is None or not solution_path.exists()
+            or puzzle_result is None or not (puzzle_result.success and puzzle_result.verify_passed)):
+        reason = ('no solution injected' if worker_result is None or not solution_path.exists()
+                  else f'plan failed verification ({puzzle_result.verify_rate:.0%})'
+                  if puzzle_result is not None else 'no puzzle result')
+        print(f'[real-robot] puzzle planning rejected — {reason}; not launching MPC')
         server_proc.kill()
         return MpcResult(scenario_name=scenario_name, success=False,
-                         steps_completed=0, total_steps=0, elapsed_time_s=0.0), initial_state
+                         steps_completed=0, total_steps=0, elapsed_time_s=0.0), initial_state, puzzle_result
 
     for pr in worker_result.get('puzzle_results', []):
         print(f'[real-robot] puzzle result: success={pr.success} plan_len={pr.plan_length}')
@@ -695,8 +810,33 @@ def _run_real_robot_scenario(scenario_name: str, out_dir: Path,
         server_proc.kill()
     print(f'[real-robot] bridge_server stopped')
 
-    mpc_result = _run_isaaclabmpc(scenario_name, None, solution_path, out_dir, cfg)
-    return mpc_result, initial_state
+    # Write a scenario YAML with the tracked block positions (bin frame, centre-shifted)
+    # and the tracked bin_center so isaaclabmpc can place walls and convert coordinates.
+    (out_dir / 'scenarios').mkdir(parents=True, exist_ok=True)
+    scenario_yaml = out_dir / 'scenarios' / f'{scenario_name}.yaml'
+    obstacle_pos = initial_state['obstacle_pos']
+    obstacle_quat = initial_state['obstacle_quat']
+    scenario_data = {
+        'bin_size': float(bin_s),
+        'bin_center': [round(v, 6) for v in bin_center],
+        'initial_state': {
+            'target_pos':  [round(v, 6) for v in initial_state['target_pos'].tolist()],
+            'target_quat': [round(v, 6) for v in initial_state['target_quat'].tolist()],
+            'obstacles': [
+                {
+                    'pos':  [round(v, 6) for v in obstacle_pos[i].tolist()],
+                    'quat': [round(v, 6) for v in obstacle_quat[i].tolist()],
+                }
+                for i in range(n_obs)
+            ],
+        },
+    }
+    with open(scenario_yaml, 'w') as f:
+        yaml.dump(scenario_data, f, default_flow_style=False, sort_keys=False)
+    print(f'[real-robot] scenario YAML written → {scenario_yaml}')
+
+    mpc_result = _run_isaaclabmpc(scenario_name, scenario_yaml, solution_path, out_dir, cfg)
+    return mpc_result, initial_state, puzzle_result
 
 
 def _log_mpc_wandb(result: MpcResult, step: int, initial_state=None,
@@ -786,6 +926,8 @@ def _load_initial_state_from_yaml(yaml_path: Path) -> dict:
 def main(cfg: DictConfig) -> None:
     initial_state_by_name: dict = {}
     plans_by_name: dict = {}
+    csv_rows: list[dict] = []
+    csv_row_by_scenario: dict[str, dict] = {}
     bin_size       = cfg.get('bin_size', 0.3)
     obj_size       = cfg.get('obj_size', 0.05)
     wall_thickness = cfg.get('wall_thickness', 0.02)
@@ -929,10 +1071,16 @@ def main(cfg: DictConfig) -> None:
                 for result in worker_result['puzzle_results']:
                     plan = worker_result['plans'].get(result.scenario_name)
                     force_traces = worker_result['force_traces'].get(result.scenario_name, [])
-                    if result.success:
+                    if result.success and result.verify_passed:
                         successful.append((result.scenario_name,
                                            out_dir / 'solutions' / f'{result.scenario_name}.json'))
+                    elif result.success:
+                        print(f'  [pipeline] {result.scenario_name}: plan found but FAILED verification '
+                              f'({result.verify_rate:.0%}) — skipping MPC execution.')
                     puzzle_results.append(result)
+                    csv_row = _puzzle_result_to_csv_row(result, cfg)
+                    csv_rows.append(csv_row)
+                    csv_row_by_scenario[result.scenario_name] = csv_row
                     _log_puzzle_wandb(
                         result, initial_state,
                         bin_size, obj_size, wall_thickness, force_threshold,
@@ -1015,7 +1163,7 @@ def main(cfg: DictConfig) -> None:
         print('Server mode: query scenario from planner, plan, inject, MPC')
         print('=' * 60)
 
-        mpc_result, initial_state = _run_real_robot_scenario(
+        mpc_result, initial_state, puzzle_result = _run_real_robot_scenario(
             scenario_name, out_dir, cfg
         )
 
@@ -1033,6 +1181,12 @@ def main(cfg: DictConfig) -> None:
             'n_mpc_success':            int(mpc_result.success),
             'isaaclabmpc_success_rate': int(mpc_result.success),
         })
+
+        if puzzle_result is not None and cfg.get('csv_path', None):
+            csv_row = _puzzle_result_to_csv_row(puzzle_result, cfg)
+            csv_row.update(_mpc_result_to_csv_fields(mpc_result))
+            _write_csv_rows([csv_row], cfg.csv_path)
+
         wandb.finish()
         return
 
@@ -1128,11 +1282,17 @@ def main(cfg: DictConfig) -> None:
                 plan = worker_result['plans'].get(scenario_name)
                 force_traces = worker_result['force_traces'].get(scenario_name, [])
 
-                if result.success:
+                if result.success and result.verify_passed:
                     solution_path = out_dir / 'solutions' / f'{scenario_name}.json'
                     successful.append((scenario_name, solution_path))
+                elif result.success:
+                    print(f'  [pipeline] {scenario_name}: plan found but FAILED verification '
+                          f'({result.verify_rate:.0%}) — skipping MPC execution.')
 
                 puzzle_results.append(result)
+                csv_row = _puzzle_result_to_csv_row(result, cfg)
+                csv_rows.append(csv_row)
+                csv_row_by_scenario[scenario_name] = csv_row
                 _log_puzzle_wandb(
                     result, initial_state,
                     bin_size, obj_size, wall_thickness, force_threshold,
@@ -1164,6 +1324,23 @@ def main(cfg: DictConfig) -> None:
             scenario_name, scenario_yaml, solution_path, out_dir, cfg
         )
         mpc_results.append(mpc_result)
+
+        mpc_fields = _mpc_result_to_csv_fields(mpc_result)
+        row = csv_row_by_scenario.get(scenario_name)
+        if row is not None:
+            row.update(mpc_fields)
+        else:
+            # No puzzle row for this scenario (e.g. resume mode, which skips
+            # puzzle planning) — still record the MPC result on its own row.
+            new_row = {
+                'scenario_name':   scenario_name,
+                'planner':         cfg.planner.name,
+                'wandb_run_name':  wandb.run.name if wandb.run else None,
+                **mpc_fields,
+            }
+            csv_rows.append(new_row)
+            csv_row_by_scenario[scenario_name] = new_row
+
         _log_mpc_wandb(
             mpc_result, cfg.n_scenarios + i,
             initial_state=initial_state_by_name.get(scenario_name),
@@ -1201,6 +1378,9 @@ def main(cfg: DictConfig) -> None:
     sol_artifact = wandb.Artifact('solutions', type='dataset')
     sol_artifact.add_dir(str(out_dir / 'solutions'))
     wandb.log_artifact(sol_artifact)
+
+    if csv_rows and cfg.get('csv_path', None):
+        _write_csv_rows(csv_rows, cfg.csv_path)
 
     wandb.finish()
 

@@ -3,15 +3,15 @@ defaults:
   - override simulator: isaaclab
   - _self_
 # Environment
-n_obstacles: 7
-parallel_envs: 16
+n_obstacles: 5
+parallel_envs: 1
 difficult_spawn: true
 
 # Benchmark
 seed: 0
-n_runs: 20
+n_runs: 100
 base_seed: 0          # run i uses seed = base_seed + i
-n_z_levels: 2
+n_z_levels: 3
 stackable: true
 bin_size: 0.4
 

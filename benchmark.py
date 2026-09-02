@@ -81,8 +81,8 @@ def _compute_push_distance(plan: list[dict], env) -> float:
     total = 0.0
     for action in plan:
         _, start, end = env._action_to_stroke(action)
-        dx = end[0] - start[0]
-        dy = end[1] - start[1]
+        dx = float(end[0]) - float(start[0])
+        dy = float(end[1]) - float(start[1])
         total += (dx * dx + dy * dy) ** 0.5
     return total
 
@@ -273,7 +273,7 @@ def main(cfg: DictConfig) -> None:
         if plan is not None:
             verify_successes, _, verify_rate, verify_passed, verify_flags = planner.verify(plan, initial_state)
             verify_std = float(np.std(verify_flags)) if verify_flags else None
-            print(f'  Benchmark verify: {verify_successes}/{env.n_envs} '
+            print(f'  Benchmark verify: {verify_successes}/{planner.n_verify_runs} '
                   f'({verify_rate:.0%}) — {"PASS" if verify_passed else "FAIL"}')
 
             if cfg.get('solutions_dir', None):
@@ -492,6 +492,7 @@ def main(cfg: DictConfig) -> None:
                 'objects_displaced_from_bin': _n_out,
                 'verify_successes':           verify_successes if plan is not None else None,
                 'verify_rate':                verify_rate if plan is not None else None,
+                'verify_passed':              (int(verify_passed) if plan is not None else None),
                 'verify_std':                 verify_std,
             })
 

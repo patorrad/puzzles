@@ -263,7 +263,7 @@ def _build_az_planner(env, args):
         c_puct=args.az_c_puct,
         seed=args.seed,
         verify_threshold=args.verify_threshold,
-        min_verify_envs=args.n_envs,
+        n_verify_runs=args.n_envs,
     )
 
 
@@ -280,7 +280,7 @@ def _build_more_planner(env, args):
         k_per_object=args.more_k,
         seed=args.seed,
         verify_threshold=args.verify_threshold,   # contour pushes are stochastic; trust direct execution
-        min_verify_envs=args.n_envs,
+        n_verify_runs=args.n_envs,
     )
 
 
@@ -293,7 +293,7 @@ def _build_mcts_planner(env, args):
         c_ucb=args.mcts_c_ucb,
         seed=args.seed,
         verify_threshold=args.verify_threshold,
-        min_verify_envs=args.n_envs,
+        n_verify_runs=args.n_envs,
     )
 
 

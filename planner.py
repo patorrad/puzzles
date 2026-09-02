@@ -183,7 +183,7 @@ def _verify_all_plans(
     plans_and_nodes: list,
     root_state: dict,
     total_envs: int,
-    min_verify_envs: int,
+    n_verify_runs: int,
     verbose: bool = True,
     pause: bool = False,
 ) -> list:
@@ -194,13 +194,13 @@ def _verify_all_plans(
     than the longest stop contributing pairs after their final action; their
     states are frozen at the correct terminal position.
 
-    Rounds are used when N * min_verify_envs > total_envs so that every plan
-    always receives at least min_verify_envs environments.
+    Rounds are used when N * n_verify_runs > total_envs so that every plan
+    always receives at least n_verify_runs environments.
 
     Returns list of (plan, node, successes, n_tries, avg_reward).
     """
     n = len(plans_and_nodes)
-    states_per_round = max(1, total_envs // min_verify_envs)
+    states_per_round = max(1, total_envs // n_verify_runs)
     all_results = []
 
     render_verify = getattr(env, 'viewer_mode', 'replay') in ('always', 'verify')
@@ -211,7 +211,7 @@ def _verify_all_plans(
     try:
         for round_start in range(0, n, states_per_round):
             batch = plans_and_nodes[round_start : round_start + states_per_round]
-            envs_each = max(min_verify_envs, total_envs // len(batch))
+            envs_each = max(n_verify_runs, total_envs // len(batch))
 
             if verbose:
                 print(f'  Verifying {len(batch)} plan(s) in parallel ({envs_each} envs each)...')
@@ -261,12 +261,12 @@ class _PlannerBase:
     """Shared behaviour for RRTPusher and MCTSPusher."""
 
     def __init__(self, env: SimulatorEnv, verify_threshold: float,
-                 min_verify_envs: int, seed: int | None,
+                 n_verify_runs: int, seed: int | None,
                  verify_push_steps: int | None = None,
                  prune_plan: bool = False):
         self.env = env
         self.verify_threshold = verify_threshold
-        self.min_verify_envs = min_verify_envs
+        self.n_verify_runs = n_verify_runs
         self.verify_push_steps = verify_push_steps
         self.prune_plan = prune_plan
         self.batch_size = env.n_envs  # 1 for single, n_envs for parallel
@@ -297,7 +297,7 @@ class _PlannerBase:
                 temperature=cfg.planner.temperature,
                 seed=seed,
                 verify_threshold=cfg.verify_threshold,
-                min_verify_envs=cfg.min_verify_envs,
+                n_verify_runs=cfg.n_verify_runs,
                 verify_push_steps=cfg.get('verify_push_steps', None),
             )
         prune = cfg.get('prune_plan', False)
@@ -311,7 +311,7 @@ class _PlannerBase:
                 target_prob=cfg.planner.target_prob,
                 seed=seed,
                 verify_threshold=cfg.verify_threshold,
-                min_verify_envs=cfg.min_verify_envs,
+                n_verify_runs=cfg.n_verify_runs,
                 verify_push_steps=cfg.get('verify_push_steps', None),
                 action_weights=list(aw) if aw is not None else None,
                 prune_plan=prune,
@@ -329,7 +329,7 @@ class _PlannerBase:
                 m=cfg.planner.m,
                 c_uct=cfg.planner.c_uct,
                 verify_threshold=cfg.verify_threshold,
-                min_verify_envs=cfg.min_verify_envs,
+                n_verify_runs=cfg.n_verify_runs,
                 verify_push_steps=cfg.get('verify_push_steps', None),
                 seed=seed,
             )
@@ -346,7 +346,7 @@ class _PlannerBase:
                 m=cfg.planner.m,
                 c_uct=cfg.planner.c_uct,
                 verify_threshold=cfg.verify_threshold,
-                min_verify_envs=cfg.min_verify_envs,
+                n_verify_runs=cfg.n_verify_runs,
                 verify_push_steps=cfg.get('verify_push_steps', None),
                 seed=seed,
             )
@@ -359,7 +359,7 @@ class _PlannerBase:
                 target_prob=cfg.planner.target_prob,
                 seed=seed,
                 verify_threshold=cfg.verify_threshold,
-                min_verify_envs=cfg.min_verify_envs,
+                n_verify_runs=cfg.n_verify_runs,
                 verify_push_steps=cfg.get('verify_push_steps', None),
                 action_weights=list(aw) if aw is not None else None,
                 prune_plan=prune,
@@ -367,13 +367,13 @@ class _PlannerBase:
 
     def verify(self, plan: list[dict], initial_state: dict,
                verbose: bool = True) -> tuple[int, float, float, bool]:
-        """Re-run plan self.min_verify_envs times in parallel and return (successes, avg_reward, rate, passed, goal_flags)."""
+        """Re-run plan self.n_verify_runs times in parallel and return (successes, avg_reward, rate, passed, goal_flags)."""
         with self.env.push_steps_ctx(self.verify_push_steps):
             successes, avg_reward, goal_flags = _verify_plan(
                 self.env, plan, initial_state,
-                n_tries=self.min_verify_envs, verbose=verbose,
+                n_tries=self.n_verify_runs, verbose=verbose,
             )
-        rate = successes / self.min_verify_envs
+        rate = successes / self.n_verify_runs
         passed = rate >= self.verify_threshold
         return successes, avg_reward, rate, passed, goal_flags
 
@@ -417,11 +417,11 @@ class RRTPusher(_PlannerBase):
 
     def __init__(self, env: SimulatorEnv, max_iter: int = 200, max_depth: int = 15,
                  goal_bias: float = 0.3, target_prob: float = 0.6, seed: int | None = 42,
-                 verify_threshold: float = 0.75, min_verify_envs: int = 16,
+                 verify_threshold: float = 0.75, n_verify_runs: int = 16,
                  verify_push_steps: int | None = None,
                  action_weights: list[float] | None = None,
                  prune_plan: bool = False):
-        super().__init__(env, verify_threshold, min_verify_envs, seed, verify_push_steps, prune_plan)
+        super().__init__(env, verify_threshold, n_verify_runs, seed, verify_push_steps, prune_plan)
         self.max_iter = max_iter
         self.max_depth = max_depth
         self.goal_bias = goal_bias
@@ -689,11 +689,11 @@ class MCTSPusher(_PlannerBase):
     def __init__(self, env: SimulatorEnv, n_simulations: int = 100,
                  rollout_depth: int = 5, max_depth: int = 10,
                  c_ucb: float = 1.4, target_prob: float = 0.6, seed: int | None = 42,
-                 verify_threshold: float = 0.75, min_verify_envs: int = 16,
+                 verify_threshold: float = 0.75, n_verify_runs: int = 16,
                  verify_push_steps: int | None = None,
                  action_weights: list[float] | None = None,
                  prune_plan: bool = False):
-        super().__init__(env, verify_threshold, min_verify_envs, seed, verify_push_steps, prune_plan)
+        super().__init__(env, verify_threshold, n_verify_runs, seed, verify_push_steps, prune_plan)
         self.n_simulations = n_simulations
         self.rollout_depth = rollout_depth
         self.max_depth = max_depth
@@ -763,7 +763,7 @@ class MCTSPusher(_PlannerBase):
                 with self.env.push_steps_ctx(self.verify_push_steps):
                     verify_results = _verify_all_plans(
                         self.env, unique, root.state,
-                        self.batch_size, self.min_verify_envs, verbose,
+                        self.batch_size, self.n_verify_runs, verbose,
                         pause=pause_before_verify,
                     )
 

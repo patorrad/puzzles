@@ -4,7 +4,7 @@ defaults:
   - _self_
 
 # Environment knobs (passed to build_env)
-n_obstacles: 10
+n_obstacles: 5
 bin_size: 0.4
 bin_size_factor: 1
 stackable: true
@@ -12,17 +12,17 @@ difficult_spawn: true
 friction: 1.0
 obj_size: 0.05
 obstacle_shapes: null  # null=all cubes; list e.g. [L,T,S,Z,I,O,J,cube]; available: cube I O T S Z L J
-n_z_levels: 3
+n_z_levels: 2
 target_z_level: null
 force_obstacle_on_target: true
-force_obstacle_on_target_prob: 1.0  # fraction of episodes that actually apply the flag; 1.0 = always, 0.0 = never
+force_obstacle_on_target_prob: 0.0  # fraction of episodes that actually apply the flag; 1.0 = always, 0.0 = never
 push_steps: 256
 substeps: 4
 wall_thickness: 0.25
 parallel_envs: 1
 seed: 0
 debug: false
-viewer: headless #always / replay / headless
+viewer: always #always / replay / headless
 
 # Training
 net_arch: mlp   # 'mlp' | 'resnet' | 'transformer' | 'deepsets' (transformer/deepsets solver-only; stacker falls back to resnet)
