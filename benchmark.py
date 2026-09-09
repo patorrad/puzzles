@@ -242,6 +242,9 @@ def _append_csv_row(csv_path: str, row: dict) -> None:
     Called once per run (rather than buffering all rows and writing at the
     end) so an interrupted benchmark keeps whatever rows it already produced.
     """
+    parent = os.path.dirname(csv_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     write_header = not os.path.exists(csv_path)
     with open(csv_path, 'a', newline='') as f:
         writer = csv.DictWriter(f, fieldnames=list(row.keys()), extrasaction='ignore')
