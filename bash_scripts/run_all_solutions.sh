@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-SOLUTIONS_ROOT="/home/paolo/Documents/puzzle/solutions"
+SOLUTIONS_ROOT="/home/paolo/Documents/puzzle/results/1_verification"
 PUZZLE_DIR="/home/paolo/Documents/puzzle"
 PYTHON="/home/paolo/miniconda3/envs/env_isaaclab/bin/python"
 
@@ -27,7 +27,8 @@ for sol_dir in "$SOLUTIONS_ROOT"/*/; do
     "$PYTHON" run_solutions.py \
         solutions_dir="$sol_dir" \
         use_wandb=false \
-        save_video=false
+        save_video=false \
+        show_mpc_world_viewer=false
 
     echo "[done] $dirname"
 done

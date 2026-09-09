@@ -15,10 +15,10 @@ debug: false
 friction: 1.0
 obj_size: 0.05   # object cube side length (metres) — one cell of any shape
 obstacle_shapes: null  # null=all cubes; list of shape names e.g. [L, T, cube]; available: cube I O T S Z L J
-n_z_levels: 1
+n_z_levels: 2
 target_z_level: null  # null = floor; integer forces the target to that z level (0=floor, 1=stacked, ...)
-force_obstacle_on_target: true  # if true, one obstacle is placed on top of the target (requires max_stack_height > target_z_level + 1)
-force_obstacle_on_target_prob: 1.0  # fraction of episodes that actually apply the flag; 1.0 = always, 0.0 = never
+force_obstacle_on_target: false  # if true, one obstacle is placed on top of the target (requires max_stack_height > target_z_level + 1)
+force_obstacle_on_target_prob: 0.0  # fraction of episodes that actually apply the flag; 1.0 = always, 0.0 = never
 push_steps: 256
 verify_push_steps: 256   # null = same as push_steps; integer = use this for verify + video
 substeps: 4

@@ -74,7 +74,11 @@ class ContourSampler:
 
     def sample(self, state: dict, k_per_object: int = 8) -> list[dict]:
         """
-        Return up to len(objects) * k_per_object * len(z_levels) push_dir actions.
+        Return up to len(objects) * k_per_object push_dir actions.
+
+        push_z is the actual z-center of each object from the state (same
+        convention as MCTS's _sample_action), so stacked blocks are pushed at
+        the correct height instead of always at self.z_levels[0].
 
         Parameters
         ----------
@@ -86,26 +90,27 @@ class ContourSampler:
         """
         actions: list[dict] = []
         obj_centers = self._get_centers(state)
+        obj_z       = self._get_z(state)
 
         for obj_idx, center_xy in enumerate(obj_centers):
             if obj_idx == 0 and not self.include_target:
                 continue
-            for z in self.z_levels:
-                starts = self._contour_samples(center_xy, k_per_object)
-                for start_xy in starts:
-                    # Push direction: inward from start toward centroid
-                    inward = center_xy - start_xy
-                    norm = inward.norm()
-                    inward_unit = inward / norm if norm > 1e-6 else inward
-                    # End point: push_through past the centroid (same as AlphaZero push_dist)
-                    end_xy = center_xy + inward_unit * self.push_through
-                    actions.append({
-                        'action_type':   'push_dir',
-                        'push_start_xy': start_xy,
-                        'push_end_xy':   end_xy,
-                        'push_z':        z,
-                        'obj_idx':       obj_idx,
-                    })
+            z = obj_z[obj_idx]
+            starts = self._contour_samples(center_xy, k_per_object)
+            for start_xy in starts:
+                # Push direction: inward from start toward centroid
+                inward = center_xy - start_xy
+                norm = inward.norm()
+                inward_unit = inward / norm if norm > 1e-6 else inward
+                # End point: push_through past the centroid (same as AlphaZero push_dist)
+                end_xy = center_xy + inward_unit * self.push_through
+                actions.append({
+                    'action_type':   'push_dir',
+                    'push_start_xy': start_xy,
+                    'push_end_xy':   end_xy,
+                    'push_z':        z,
+                    'obj_idx':       obj_idx,
+                })
         return actions
 
     def sample_for_object(self, center_xy: torch.Tensor, obj_idx: int,
@@ -137,6 +142,13 @@ class ContourSampler:
         for i in range(len(state['obstacle_pos'])):
             centers.append(state['obstacle_pos'][i, :2].float())
         return centers
+
+    def _get_z(self, state: dict) -> list[float]:
+        """Return the actual z-center of each object from the state."""
+        z = [float(state['target_pos'][2])]
+        for i in range(len(state['obstacle_pos'])):
+            z.append(float(state['obstacle_pos'][i, 2]))
+        return z
 
     def _contour_samples(self, center_xy: torch.Tensor,
                          k: int) -> list[torch.Tensor]:

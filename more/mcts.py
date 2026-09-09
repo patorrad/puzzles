@@ -189,7 +189,10 @@ class MORETree:
         if not root.children:
             return None
 
-        best = max(root.children, key=lambda n: n.q_best())
+        live = [n for n in root.children if not n.dead_end]
+        if not live:
+            return None
+        best = max(live, key=lambda n: n.q_best())
         return best.action
 
     # ------------------------------------------------------------------

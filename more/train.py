@@ -63,7 +63,8 @@ from more.ppn import PPN, build_ppn
 def _build_env(sim: str, n_obs: int, n_envs: int,
                stackable: bool = False, n_z_levels: int = 1,
                bin_size: float | None = None, difficult_spawn: bool = False,
-               force_obstacle_on_target: bool = False):
+               force_obstacle_on_target: bool = False,
+               viewer: str = 'headless'):
     """Build a BinEnv by loading the project's Hydra YAML config files."""
     from omegaconf import OmegaConf
     from simulators import build_env
@@ -91,7 +92,7 @@ def _build_env(sim: str, n_obs: int, n_envs: int,
     # build_env doesn't need.
     OmegaConf.set_struct(cfg, False)
     cfg.pop('defaults', None)
-    return build_env(cfg, n_envs=n_envs, viewer_mode='headless')
+    return build_env(cfg, n_envs=n_envs, viewer_mode=viewer)
 
 
 # ---------------------------------------------------------------------------
@@ -366,6 +367,9 @@ def _parse_args():
                    help='Simulator backend (isaaclab | genesis)')
     p.add_argument('--n_obs',      type=int, default=2)
     p.add_argument('--n_envs',     type=int, default=8)
+    p.add_argument('--viewer',     default='headless',
+                   choices=['headless', 'replay', 'verify', 'always'],
+                   help='Viewer mode for the collection env — use "always" to watch it live')
     p.add_argument('--difficult_spawn', action='store_true',
                    help='Use difficult initial spawn positions')
     p.add_argument('--force_obstacle_on_target', action='store_true',
@@ -406,11 +410,13 @@ def main():
 
     if args.phase in ('collect', 'both'):
         if args.sim == 'isaaclab':
-            os.environ.setdefault('ISAACLAB_HEADLESS', '1')
+            _viewer_to_headless = {'headless': '1', 'replay': '0', 'verify': '0', 'always': '0'}
+            os.environ.setdefault('ISAACLAB_HEADLESS', _viewer_to_headless[args.viewer])
         env = _build_env(args.sim, n_obs=args.n_obs, n_envs=args.n_envs,
                          stackable=args.stackable, n_z_levels=args.n_z_levels,
                          bin_size=args.bin_size, difficult_spawn=args.difficult_spawn,
-                         force_obstacle_on_target=args.force_obstacle_on_target)
+                         force_obstacle_on_target=args.force_obstacle_on_target,
+                         viewer=args.viewer)
         cfg_c = CollectConfig(
             n_scenes=args.n_scenes,
             n_simulations=args.n_simulations,

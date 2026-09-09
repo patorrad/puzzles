@@ -10,6 +10,8 @@ scenario_source: server
 server_scenario_name: server_scenario
 scenario_file: null
 
+puzzle_timeout_s: 500           # max seconds for puzzle planning before giving up
+
 use_real_world: true            # use real_world.py instead of world.py for MPC execution
 show_mpc_planner_viewer: false  # open Isaac viewer during puzzle planning (planner.py / puzzle solver)
 show_mpc_world_viewer: true     # open Isaac viewer during MPC execution (world.py)

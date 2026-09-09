@@ -7,18 +7,20 @@ planner:
   target_prob: 0.35
 
 # Scenario generation
-n_scenarios: 10
-n_obstacles: 3
+n_scenarios: 1000
+n_obstacles: 7
 bin_size: 0.4
 seed: 42
-stackable: false
+stackable: true
 difficult_spawn: false
+max_stack_height: 2
+n_z_levels: 3
 
 # Override config.yaml defaults for isaaclabmpc compatibility
 wall_thickness: 0.02
 friction: 1.2
 parallel_envs: 128
-viewer: headless
+viewer: always
 
 # Puzzle solver child process (null = wait indefinitely)
 puzzle_timeout_s: null

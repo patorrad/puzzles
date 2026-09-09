@@ -123,16 +123,40 @@ def _render_state_image(state: dict, env) -> 'wandb.Image':
 def _get_final_state(env, plan, initial_state):
     """Execute plan sequentially via batch_evaluate.
 
-    Returns (final_state, force_traces) where force_traces is a list of
-    per-action force-magnitude lists (IsaacLab only; empty list otherwise).
+    Returns (final_state, force_traces, all_states) where force_traces is a list of
+    per-action force-magnitude lists (IsaacLab only; empty list otherwise), and
+    all_states is [initial_state, state_after_action_0, ..., final_state].
     """
     state = initial_state
     force_traces = []
+    all_states = [initial_state]
     for action in plan:
         (state, _, _), = env.batch_evaluate([(state, action)])
         if hasattr(env, 'force_trace'):
             force_traces.append(list(env.force_trace))
-    return state, force_traces
+        all_states.append(state)
+    return state, force_traces, all_states
+
+
+def _render_state_sequence(states: list, plan: list[dict], env) -> list:
+    """Render [initial, after each step, final] as captioned wandb.Image frames."""
+    import matplotlib.pyplot as plt
+    from visualization import render_scenario
+    frames = []
+    n = len(plan)
+    for k, state in enumerate(states):
+        if k == 0:
+            caption = 'initial'
+        elif k == n:
+            action = plan[k - 1]
+            caption = f'final (step {k}: {action["action_type"]} obj={action["obj_idx"]})'
+        else:
+            action = plan[k - 1]
+            caption = f'step {k}: {action["action_type"]} obj={action["obj_idx"]}'
+        fig = render_scenario(state, env.bin_w, env.bin_d, env._OBJ_SIZE, env.wall_thickness)
+        frames.append(wandb.Image(fig, caption=caption))
+        plt.close(fig)
+    return frames
 
 
 
@@ -260,6 +284,10 @@ def main(cfg: DictConfig) -> None:
 
     for i in range(cfg.n_runs):
         seed = cfg.base_seed + i
+
+        if i < cfg.get('skip_runs', 0):
+            continue
+
         initial_state = env.reset(seed=seed)
         wandb.log({'run/initial_state': _render_state_image(initial_state, env)}, step=i)
 
@@ -298,9 +326,11 @@ def main(cfg: DictConfig) -> None:
                 except Exception as e:
                     print(f'  [benchmark] record_replay failed: {e}')
 
-            final_state_replay, force_traces = _get_final_state(env, plan, initial_state)
+            final_state_replay, force_traces, state_sequence = _get_final_state(env, plan, initial_state)
             if final_state is None:
                 final_state = final_state_replay
+
+            wandb.log({'run/state_sequence': _render_state_sequence(state_sequence, plan, env)}, step=i)
 
             result.reward_components = env.compute_reward_components(final_state)
             result.final_reward = sum(result.reward_components.values())

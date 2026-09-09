@@ -333,22 +333,13 @@ class _PlannerBase:
                 verify_push_steps=cfg.get('verify_push_steps', None),
                 seed=seed,
             )
-        if cfg.planner.name == 'more':
-            from more.planner import MOREPlanner
-            return MOREPlanner(
+        if cfg.planner.name == 'direct_push':
+            return DirectPushPlanner(
                 env=env,
-                ppn_path=cfg.planner.get('ppn_checkpoint', None),
-                n_simulations=cfg.planner.n_simulations,
-                tree_depth=cfg.planner.max_depth,
-                gamma=cfg.planner.gamma,
-                k_per_object=cfg.planner.k_per_object,
-                rollout_depth=cfg.planner.rollout_depth,
-                m=cfg.planner.m,
-                c_uct=cfg.planner.c_uct,
                 verify_threshold=cfg.verify_threshold,
                 n_verify_runs=cfg.n_verify_runs,
-                verify_push_steps=cfg.get('verify_push_steps', None),
                 seed=seed,
+                verify_push_steps=cfg.get('verify_push_steps', None),
             )
         else:
             return RRTPusher(
@@ -376,6 +367,32 @@ class _PlannerBase:
         rate = successes / self.n_verify_runs
         passed = rate >= self.verify_threshold
         return successes, avg_reward, rate, passed, goal_flags
+
+
+# ===========================================================================
+# Direct-push baseline (no search)
+# ===========================================================================
+
+class DirectPushPlanner(_PlannerBase):
+    """Baseline planner: skip search entirely and always emit a single
+    'pull_s' action that drags the target straight out through the south
+    exit in one stroke (see SimulatorEnv._action_to_stroke). Ignores every
+    obstacle — useful as a no-planning lower bound to compare against
+    RRT/MCTS/AlphaZero/MORE."""
+
+    def plan(self, initial_state: dict | None = None, verbose: bool = True,
+             pause_before_verify: bool = False) -> list[dict] | None:
+        state = initial_state if initial_state is not None else self.env.get_state(0)
+        target_pos = state['target_pos'][:3]
+        action = {
+            'action_type': 'pull_s',
+            'obj_idx': 0,
+            'push_pos': target_pos[:2],
+            'push_z': float(target_pos[2]),
+        }
+        if verbose:
+            print(f'  [DirectPushPlanner] pull_s target from {target_pos[:2].tolist()}')
+        return [action]
 
 
 # ===========================================================================

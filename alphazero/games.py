@@ -115,7 +115,9 @@ class SolverGame:
         self.env = env
         self.spec = spec
         self.n_obstacles = env.n_obstacles
-        self.n_z_levels = max(1, env.n_z_levels)
+        # Use spec.Z when available (authoritative for AlphaZero checkpoints);
+        # fall back to env for MCTS where spec is built from the env itself.
+        self.n_z_levels = spec.Z if spec is not None and spec.Z > 0 else max(1, env.n_z_levels)
         self.max_depth = max_depth
         self.reward_scale = reward_scale
         self.n_actions = solver_action_dim(self.n_obstacles, self.n_z_levels)

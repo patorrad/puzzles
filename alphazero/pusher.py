@@ -66,15 +66,21 @@ class AlphaZeroPusher:
                 env_spec.Gx, env_spec.Gy, env_spec.Z,
                 self.spec.Gx, self.spec.Gy, self.spec.Z)
 
-        # Derive the n_obstacles the checkpoint was trained with and fail fast
-        # if it doesn't match the env, rather than crashing inside the network.
-        ckpt_n_z = len(self.spec.z_levels) or 1
+        # Validate that the checkpoint action space matches the env.
+        ckpt_n_z  = len(self.spec.z_levels) or 1
         ckpt_n_obs = ckpt['solver_n_actions'] // (4 * ckpt_n_z) - 1
         if ckpt_n_obs != env.n_obstacles:
             raise ValueError(
                 f'Checkpoint {solver_net_path!r} was trained with n_obstacles={ckpt_n_obs} '
                 f'but the environment has n_obstacles={env.n_obstacles}. '
                 f'Pass n_obstacles={ckpt_n_obs} to benchmark.py.'
+            )
+        if ckpt_n_z != env.n_z_levels:
+            logger.warning(
+                'Checkpoint %r was trained with n_z_levels=%d but env has n_z_levels=%d. '
+                'SolverGame will use the checkpoint value (%d) — ensure cfg.n_z_levels '
+                'is set to %d so the planning env simulates the correct stack heights.',
+                solver_net_path, ckpt_n_z, env.n_z_levels, ckpt_n_z, ckpt_n_z,
             )
 
     def plan(self, initial_state: dict | None = None,
