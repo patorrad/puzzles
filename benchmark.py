@@ -236,6 +236,20 @@ def _aggregate(results: list[RunResult]) -> AggregateStats:
     )
 
 
+def _append_csv_row(csv_path: str, row: dict) -> None:
+    """Append one row to csv_path, writing the header first if the file is new.
+
+    Called once per run (rather than buffering all rows and writing at the
+    end) so an interrupted benchmark keeps whatever rows it already produced.
+    """
+    write_header = not os.path.exists(csv_path)
+    with open(csv_path, 'a', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=list(row.keys()), extrasaction='ignore')
+        if write_header:
+            writer.writeheader()
+        writer.writerow(row)
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -502,7 +516,7 @@ def main(cfg: DictConfig) -> None:
                 _push_dist = _compute_push_distance(plan, env)
                 _obj_disp, _n_moved, _n_out = _compute_object_metrics(
                     initial_state, final_state, env)
-            csv_rows.append({
+            row = {
                 'seed':                       seed,
                 'planner':                    cfg.planner.name,
                 'wandb_run_name':             wandb.run.name if wandb.run else None,
@@ -524,7 +538,9 @@ def main(cfg: DictConfig) -> None:
                 'verify_rate':                verify_rate if plan is not None else None,
                 'verify_passed':              (int(verify_passed) if plan is not None else None),
                 'verify_std':                 verify_std,
-            })
+            }
+            csv_rows.append(row)
+            _append_csv_row(cfg.csv_path, row)
 
     # Aggregate stats
     agg = _aggregate(results)
@@ -546,16 +562,8 @@ def main(cfg: DictConfig) -> None:
         wandb.run.summary[key] = val
 
     if csv_rows and cfg.get('csv_path', None):
-        csv_path = cfg.csv_path
-        write_header = not os.path.exists(csv_path)
-        with open(csv_path, 'a', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=list(csv_rows[0].keys()),
-                                    extrasaction='ignore')
-            if write_header:
-                writer.writeheader()
-            writer.writerows(csv_rows)
-        print(f'[benchmark] CSV written → {csv_path} ({len(csv_rows)} rows, '
-              f'{"new file" if write_header else "appended"})')
+        print(f'[benchmark] CSV rows written incrementally → {cfg.csv_path} '
+              f'({len(csv_rows)} rows this run)')
 
     wandb.finish()
 

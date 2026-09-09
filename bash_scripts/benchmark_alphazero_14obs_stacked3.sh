@@ -21,7 +21,7 @@ CHECKPOINT="outputs/14obs_stacked3_diff_bottom/n_sim_sol200_nn1024_random_stacke
 
 python benchmark.py --config-name=benchmark n_obstacles=14 n_z_levels=3 force_obstacle_on_target=true planner=alphazero \
     planner.checkpoint="$CHECKPOINT" \
-    skip_runs=50 \
+    skip_runs=0 \
     wandb_run_name=n_sim_sol200_nn1024_random_stacker_14obs_stacked3_diff_bottom_part2 \
     csv_path=results/1_verification/14obs_stacked3_diff_bottom \
     solutions_dir=solutions/1_verification/alphazero_mlp1024_14obs_stacked3_diff_bottom_iter100

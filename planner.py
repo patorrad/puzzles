@@ -824,7 +824,11 @@ class MCTSPusher(_PlannerBase):
 
         self.root = root
         self.best_leaf = best_leaf
-        return self._extract_path(best_leaf) if best_leaf and best_leaf.depth > 0 else None
+        # No verified goal node was found within the simulation budget — report
+        # failure honestly (matching AlphaZero) instead of returning best_leaf's
+        # path, which was chosen from a noisy rollout reward and was never itself
+        # confirmed to reach the goal.
+        return None
 
     # ------------------------------------------------------------------
     # MCTS phases - handle both single and parallel modes
