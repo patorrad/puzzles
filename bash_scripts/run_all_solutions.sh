@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-SOLUTIONS_ROOT="/home/paolo/Documents/puzzle/results/1_verification"
+SOLUTIONS_ROOT="/home/paolo/Documents/puzzle/solutions/1_verification"
 PUZZLE_DIR="/home/paolo/Documents/puzzle"
 PYTHON="/home/paolo/miniconda3/envs/env_isaaclab/bin/python"
 

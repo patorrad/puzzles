@@ -37,7 +37,7 @@ for obs in 7 10 14; do
         solutions_dir="$sol_dir" \
         use_wandb=false \
         save_video=false \
-        show_mpc_world_viewer=true
+        show_mpc_world_viewer=false
 
 done
 

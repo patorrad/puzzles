@@ -141,6 +141,28 @@ def _write_csv(csv_path: Path, rows: list[dict]) -> None:
     print(f"\n[run_solutions] CSV saved: {csv_path}")
 
 
+def _mpc_result_from_output(name: str, out_path: Path) -> MpcResult:
+    """Build an MpcResult from a written isaaclabmpc_results/<name>.json (or
+    a zeroed placeholder if the file doesn't exist, e.g. never attempted)."""
+    result_data = {}
+    if out_path.exists():
+        with open(out_path) as f:
+            result_data = json.load(f)
+    return MpcResult(
+        scenario_name          = name,
+        success                = result_data.get("success", False),
+        steps_completed        = result_data.get("steps_completed", 0),
+        total_steps            = result_data.get("total_steps", 0),
+        elapsed_time_s         = result_data.get("elapsed_time_s", 0.0),
+        ee_trajectory          = result_data.get("ee_trajectory"),
+        block_positions_final  = result_data.get("block_positions_final"),
+        step_completion_events = None,
+        mppi_cost_history      = None,
+        target_exited          = result_data.get("target_exited", False),
+        intruder_exited        = result_data.get("intruder_exited", False),
+    )
+
+
 def _run_multi_episode(manifest_path: Path, out_dir: Path, cfg: DictConfig,
                        first_scenario: Path | None) -> list[MpcResult]:
     """Launch planner + world once and run all manifest episodes without relaunching Isaac Lab."""
@@ -204,27 +226,7 @@ def _run_multi_episode(manifest_path: Path, out_dir: Path, cfg: DictConfig,
         except subprocess.TimeoutExpired:
             planner_proc.kill()
 
-    results = []
-    for ep in episodes:
-        out_path = Path(ep["output_path"])
-        result_data = {}
-        if out_path.exists():
-            with open(out_path) as f:
-                result_data = json.load(f)
-        results.append(MpcResult(
-            scenario_name       = ep["name"],
-            success             = result_data.get("success", False),
-            steps_completed     = result_data.get("steps_completed", 0),
-            total_steps         = result_data.get("total_steps", 0),
-            elapsed_time_s      = result_data.get("elapsed_time_s", 0.0),
-            ee_trajectory       = result_data.get("ee_trajectory"),
-            block_positions_final = result_data.get("block_positions_final"),
-            step_completion_events = None,
-            mppi_cost_history   = None,
-            target_exited       = result_data.get("target_exited", False),
-            intruder_exited     = result_data.get("intruder_exited", False),
-        ))
-    return results
+    return [_mpc_result_from_output(ep["name"], Path(ep["output_path"])) for ep in episodes]
 
 
 @hydra.main(version_base=None, config_path="conf", config_name="run_solutions")
@@ -263,8 +265,15 @@ def main(cfg: DictConfig) -> None:
     csv_rows: list[dict] = []
 
     # Generate scenario YAMLs for all solutions upfront and write the manifest.
+    # Episodes whose isaaclabmpc_results/<name>.json already shows total_steps > 0
+    # were genuinely attempted in a prior run (success or failure) and are skipped;
+    # only episodes that never got a chance to execute (missing output, or
+    # total_steps == 0 — e.g. cut off by a prior run's global timeout) are rerun.
+    # This makes re-running run_solutions.py on the same directory a resume, not
+    # a full redo.
     manifest_episodes = []
     resolved_solutions = []
+    already_good: dict[str, MpcResult] = {}
     for name, sol_path, scenario_yaml in solutions:
         if scenario_yaml is None:
             scenario_yaml = _make_scenario_yaml_from_solution(
@@ -272,6 +281,13 @@ def main(cfg: DictConfig) -> None:
             ).resolve()
         result_json = (out_dir / "isaaclabmpc_results" / f"{name}.json").resolve()
         video_path  = (out_dir / "videos" / f"{name}.mp4").resolve()
+        resolved_solutions.append((name, sol_path, scenario_yaml))
+
+        existing = _mpc_result_from_output(name, result_json)
+        if existing.total_steps > 0:
+            already_good[name] = existing
+            continue
+
         manifest_episodes.append({
             "name":          name,
             "scenario_yaml": str(scenario_yaml),
@@ -279,15 +295,26 @@ def main(cfg: DictConfig) -> None:
             "output_path":   str(result_json),
             "video_path":    str(video_path),
         })
-        resolved_solutions.append((name, sol_path, scenario_yaml))
+
+    if already_good:
+        print(f"[run_solutions] Skipping {len(already_good)} already-attempted "
+              f"episode(s); running {len(manifest_episodes)} remaining.")
 
     manifest_path = (out_dir / "manifest.json").resolve()
     with open(manifest_path, "w") as f:
         json.dump({"episodes": manifest_episodes}, f, indent=2)
     print(f"[run_solutions] Manifest written: {manifest_path}")
 
-    first_scenario = Path(manifest_episodes[0]["scenario_yaml"]) if manifest_episodes else None
-    mpc_results = _run_multi_episode(manifest_path, out_dir, cfg, first_scenario)
+    if manifest_episodes:
+        first_scenario = Path(manifest_episodes[0]["scenario_yaml"])
+        freshly_run = {r.scenario_name: r
+                      for r in _run_multi_episode(manifest_path, out_dir, cfg, first_scenario)}
+    else:
+        print("[run_solutions] Nothing to run — all episodes already attempted.")
+        freshly_run = {}
+
+    mpc_results = [already_good.get(name) or freshly_run[name]
+                  for name, _, _ in resolved_solutions]
 
     # WandB logging and CSV — happens after world.py finishes all episodes.
     for i, (mpc_result, (name, sol_path, _)) in enumerate(
