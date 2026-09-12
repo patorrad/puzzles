@@ -15,10 +15,13 @@ from .grid import GridSpec
 OBJ_POSE_DIM = 7
 
 
-def solver_state_dim(spec: GridSpec, n_obstacles: int) -> int:
+def solver_state_dim(spec: GridSpec, n_obstacles: int, use_cell_onehot: bool = True) -> int:
     """Length of the flat vector returned by encode_solver_state."""
     n_objects = 1 + n_obstacles
-    return OBJ_POSE_DIM * n_objects + spec.Gx * spec.Gy * n_objects
+    dim = OBJ_POSE_DIM * n_objects
+    if use_cell_onehot:
+        dim += spec.Gx * spec.Gy * n_objects
+    return dim
 
 
 def _canonical_quat(q: torch.Tensor) -> torch.Tensor:
@@ -38,7 +41,8 @@ def _pad_rows(x: torch.Tensor, n_rows: int) -> torch.Tensor:
     return torch.cat([x, torch.zeros(n_rows - x.shape[0], x.shape[1])])
 
 
-def encode_solver_state(state: dict, spec: GridSpec, n_obstacles: int) -> torch.Tensor:
+def encode_solver_state(state: dict, spec: GridSpec, n_obstacles: int,
+                        use_cell_onehot: bool = True) -> torch.Tensor:
     """Flat encoding: continuous poses + orientations + per-cell one-hots.
 
     Section-contiguous layout (lets SolverTransformer reshape each section to
@@ -47,6 +51,10 @@ def encode_solver_state(state: dict, spec: GridSpec, n_obstacles: int) -> torch.
       target_quat (4), obstacle_quat (4*N),
       target_cell_one_hot (Gx*Gy),
       per-obstacle_cell_one_hot (Gx*Gy * N) ]
+
+    use_cell_onehot=False drops the two one-hot sections entirely (ablation —
+    only SolverNet/SolverDeepSets support this; SolverResNet/SolverTransformer
+    structurally require the grid one-hots).
     """
     target_pos = state['target_pos'].detach().float().cpu()[:3]
     obstacle_pos = state['obstacle_pos'].detach().float().cpu().reshape(-1, 3)
@@ -60,19 +68,20 @@ def encode_solver_state(state: dict, spec: GridSpec, n_obstacles: int) -> torch.
     if n_obstacles > 0:
         parts.append(_pad_rows(obstacle_quat, n_obstacles).flatten())
 
-    n_cells = spec.Gx * spec.Gy
-    target_oh = torch.zeros(n_cells)
-    ti, tj, _ = spec.nearest_cell(float(target_pos[0]), float(target_pos[1]), float(target_pos[2]))
-    target_oh[ti * spec.Gy + tj] = 1.0
-    parts.append(target_oh)
+    if use_cell_onehot:
+        n_cells = spec.Gx * spec.Gy
+        target_oh = torch.zeros(n_cells)
+        ti, tj, _ = spec.nearest_cell(float(target_pos[0]), float(target_pos[1]), float(target_pos[2]))
+        target_oh[ti * spec.Gy + tj] = 1.0
+        parts.append(target_oh)
 
-    for n in range(n_obstacles):
-        oh = torch.zeros(n_cells)
-        if n < obstacle_pos.shape[0]:
-            x, y, z = obstacle_pos[n].tolist()
-            i, j, _ = spec.nearest_cell(x, y, z)
-            oh[i * spec.Gy + j] = 1.0
-        parts.append(oh)
+        for n in range(n_obstacles):
+            oh = torch.zeros(n_cells)
+            if n < obstacle_pos.shape[0]:
+                x, y, z = obstacle_pos[n].tolist()
+                i, j, _ = spec.nearest_cell(x, y, z)
+                oh[i * spec.Gy + j] = 1.0
+            parts.append(oh)
 
     return torch.cat(parts)
 

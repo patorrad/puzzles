@@ -31,12 +31,20 @@ from .selfplay import SelfPlayConfig, play_batched_episodes, play_batched_episod
 logger = logging.getLogger(__name__)
 
 
-def _build_networks(env, spec, arch: str = 'mlp', build_stacker: bool = True):
+def _build_networks(env, spec, arch: str = 'mlp', build_stacker: bool = True,
+                    use_cell_onehot: bool = True):
+    if not use_cell_onehot and arch in ('resnet', 'transformer'):
+        raise ValueError(
+            f"use_cell_onehot=False is incompatible with net_arch={arch!r} — "
+            f"SolverResNet/SolverTransformer structurally require the grid "
+            f"one-hots (conv tower / per-object tokens built from them). "
+            f"Use net_arch=mlp or net_arch=deepsets for this ablation."
+        )
     n_obs = env.n_obstacles
     Z = max(1, env.n_z_levels)
     solver = build_solver_net(
         arch,
-        in_dim=solver_state_dim(spec, n_obs),
+        in_dim=solver_state_dim(spec, n_obs, use_cell_onehot=use_cell_onehot),
         n_actions=solver_action_dim(n_obs, Z),
         n_obstacles=n_obs, grid_h=spec.Gx, grid_w=spec.Gy,
     )
@@ -126,7 +134,8 @@ def _record_demo_episode(env, solver_net, stacker_net, spec, sp_cfg, device,
     settled_state = env.get_state(0)
 
     # Solver phase — greedy plan
-    solver_game = SolverGame(env, spec, max_depth=sp_cfg.max_depth)
+    solver_game = SolverGame(env, spec, max_depth=sp_cfg.max_depth,
+                             use_cell_onehot=sp_cfg.use_cell_onehot)
     state = solver_game.initial_state(settled_state)
     plan: list[dict] = []
     for _ in range(sp_cfg.max_depth):
@@ -183,10 +192,12 @@ def train(env, cfg):
     random_stacker = bool(cfg.get('random_stacker', False))
 
     net_arch = cfg.get('net_arch', 'mlp')
+    use_cell_onehot = bool(cfg.get('use_cell_onehot', True))
     solver_net, stacker_net = _build_networks(env, spec, net_arch,
-                                              build_stacker=not random_stacker)
-    logger.info('net_arch=%s: solver %s (%d params)%s',
-                net_arch,
+                                              build_stacker=not random_stacker,
+                                              use_cell_onehot=use_cell_onehot)
+    logger.info('net_arch=%s use_cell_onehot=%s: solver %s (%d params)%s',
+                net_arch, use_cell_onehot,
                 type(solver_net).__name__,
                 sum(p.numel() for p in solver_net.parameters()),
                 f', stacker {type(stacker_net).__name__} ({sum(p.numel() for p in stacker_net.parameters())} params)'
@@ -220,6 +231,7 @@ def train(env, cfg):
                     resume_from, ckpt['iter'], start_iter)
 
     sp_cfg = SelfPlayConfig(**dict(cfg.selfplay))
+    sp_cfg.use_cell_onehot = use_cell_onehot
 
     use_wandb = bool(cfg.use_wandb)
     wandb = None
@@ -316,6 +328,7 @@ def train(env, cfg):
             ckpt = {
                 'iter': it,
                 'net_arch': net_arch,
+                'use_cell_onehot': use_cell_onehot,
                 'n_obstacles': env.n_obstacles,
                 'solver': solver_net.state_dict(),
                 'stacker': stacker_net.state_dict() if stacker_net else None,

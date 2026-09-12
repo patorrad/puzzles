@@ -157,7 +157,8 @@ def evaluate(env, solver_net, stacker_net, spec: GridSpec, sp_cfg: SelfPlayConfi
     """
     rng = random.Random(seed)
     n_obstacles = env.n_obstacles
-    solver_game = SolverGame(env, spec, max_depth=sp_cfg.max_depth)
+    solver_game = SolverGame(env, spec, max_depth=sp_cfg.max_depth,
+                             use_cell_onehot=sp_cfg.use_cell_onehot)
 
     solver_wins = 0
     stacker_wins = 0
@@ -272,11 +273,13 @@ def evaluate(env, solver_net, stacker_net, spec: GridSpec, sp_cfg: SelfPlayConfi
     )
 
 
-def load_checkpoint(path: str) -> tuple[nn.Module, nn.Module, GridSpec]:
+def load_checkpoint(path: str) -> tuple[nn.Module, nn.Module, GridSpec, bool]:
     ckpt = torch.load(path, map_location='cpu', weights_only=False)
     spec = GridSpec(**ckpt['spec'])
-    # Checkpoints from before the net_arch knob are always MLPs.
+    # Checkpoints from before the net_arch/use_cell_onehot knobs are always
+    # MLPs trained with the grid one-hots included.
     arch = ckpt.get('net_arch', 'mlp')
+    use_cell_onehot = ckpt.get('use_cell_onehot', True)
     solver = build_solver_net(arch,
                               in_dim=ckpt['solver_in_dim'],
                               n_actions=ckpt['solver_n_actions'],
@@ -290,4 +293,4 @@ def load_checkpoint(path: str) -> tuple[nn.Module, nn.Module, GridSpec]:
                                 n_actions=ckpt['stacker_n_actions'])
     stacker.load_state_dict(ckpt['stacker'])
     stacker.eval()
-    return solver, stacker, spec
+    return solver, stacker, spec, use_cell_onehot

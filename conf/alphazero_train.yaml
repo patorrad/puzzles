@@ -26,6 +26,7 @@ viewer: always #always / replay / headless
 
 # Training
 net_arch: mlp   # 'mlp' | 'resnet' | 'transformer' | 'deepsets' (transformer/deepsets solver-only; stacker falls back to resnet)
+use_cell_onehot: true   # ablation: drop per-object grid-cell one-hots from solver_state (mlp/deepsets only — resnet/transformer require them)
 n_iterations: 100
 episodes_per_iter: 32
 train_steps_per_iter: 100

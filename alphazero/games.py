@@ -111,7 +111,7 @@ class SolverGame:
     """Solver-side adapter. Wraps env for transitions and goal/dropout checks."""
 
     def __init__(self, env, spec: GridSpec, max_depth: int = 10,
-                 reward_scale: float = 0.0):
+                 reward_scale: float = 0.0, use_cell_onehot: bool = True):
         self.env = env
         self.spec = spec
         self.n_obstacles = env.n_obstacles
@@ -120,10 +120,12 @@ class SolverGame:
         self.n_z_levels = spec.Z if spec is not None and spec.Z > 0 else max(1, env.n_z_levels)
         self.max_depth = max_depth
         self.reward_scale = reward_scale
+        self.use_cell_onehot = use_cell_onehot
         self.n_actions = solver_action_dim(self.n_obstacles, self.n_z_levels)
 
     def encode(self, state: dict) -> torch.Tensor:
-        return encode_solver_state(state['env_state'], self.spec, self.n_obstacles)
+        return encode_solver_state(state['env_state'], self.spec, self.n_obstacles,
+                                   use_cell_onehot=self.use_cell_onehot)
 
     def legal_mask(self, state: dict) -> torch.Tensor:
         return torch.ones(self.n_actions, dtype=torch.bool)

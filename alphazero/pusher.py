@@ -56,6 +56,9 @@ class AlphaZeroPusher:
         self.batch_size = max(1, env.n_envs)
 
         self.net, ckpt = _load_solver_net(solver_net_path)
+        # Checkpoints from before the use_cell_onehot knob were always trained
+        # with the grid one-hots included.
+        self.use_cell_onehot = ckpt.get('use_cell_onehot', True)
         spec_dict = ckpt['spec']
         self.spec = GridSpec(**spec_dict)
         env_spec = build_grid_spec(env)
@@ -89,7 +92,8 @@ class AlphaZeroPusher:
         if initial_state is None:
             initial_state = self.env.get_state(0)
 
-        game = SolverGame(self.env, self.spec, max_depth=self.max_depth)
+        game = SolverGame(self.env, self.spec, max_depth=self.max_depth,
+                         use_cell_onehot=self.use_cell_onehot)
         mcts = AZMCTS(game, self.net, c_puct=self.c_puct,
                       dirichlet_eps=0.0)
 

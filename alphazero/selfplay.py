@@ -36,6 +36,7 @@ class SelfPlayConfig:
     settle_steps: int = 10
     gamma: float = 0.95  # discount applied to value targets along the episode
     reward_scale: float = 2.0  # divides env._compute_reward; 0 = sparse ±1 fallback
+    use_cell_onehot: bool = True  # ablation: drop per-object grid-cell one-hots from solver_state
 
 
 @dataclass
@@ -137,7 +138,8 @@ def play_batched_episodes(env, solver_net, stacker_net,
     env_states = [env.get_state(i) for i in range(K)]
 
     solver_game = SolverGame(env, spec, max_depth=cfg.max_depth,
-                             reward_scale=cfg.reward_scale)
+                             reward_scale=cfg.reward_scale,
+                             use_cell_onehot=cfg.use_cell_onehot)
     solver_records: list[list[Record]] = [[] for _ in range(K)]
     step_env_states: list[list[dict]] = [[] for _ in range(K)]
     states = [solver_game.initial_state(es) for es in env_states]
@@ -225,7 +227,8 @@ def play_batched_episodes_random(env, solver_net, spec: GridSpec, K: int,
     env_states = [env.get_state(i) for i in range(K)]
 
     solver_game = SolverGame(env, spec, max_depth=cfg.max_depth,
-                             reward_scale=cfg.reward_scale)
+                             reward_scale=cfg.reward_scale,
+                             use_cell_onehot=cfg.use_cell_onehot)
     solver_records: list[list[Record]] = [[] for _ in range(K)]
     step_env_states: list[list[dict]] = [[] for _ in range(K)]
     states = [solver_game.initial_state(es) for es in env_states]
@@ -332,7 +335,8 @@ def play_episode(env, solver_net, stacker_net,
 
     # Solver play
     solver_game = SolverGame(env, spec, max_depth=cfg.max_depth,
-                             reward_scale=cfg.reward_scale)
+                             reward_scale=cfg.reward_scale,
+                             use_cell_onehot=cfg.use_cell_onehot)
     solver_mcts = AZMCTS(solver_game, solver_net,
                          c_puct=cfg.c_puct,
                          dirichlet_alpha=cfg.dirichlet_alpha,
