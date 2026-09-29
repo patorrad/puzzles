@@ -26,9 +26,9 @@ for obs in 5 7 10 14; do
     echo "========================================"
     python benchmark.py $BENCH planner=mcts \
         n_obstacles=${obs} \
-        wandb_run_name=mcts_random_stacker_${obs}obs_stacked2_difficult \
-        csv_path=results/1_verification/${obs}obs_stacked2_difficult \
-        solutions_dir=results/1_verification/mcts_${obs}obs_stacked2_difficult
+        wandb_run_name=mcts_random_stacker_${obs}obs_stacked2_difficult_ablation_mcts \
+        csv_path=results/1_verification_stacked3_ablation_mcts/${obs}obs_stacked2_difficult \
+        solutions_dir=results/1_verification_stacked3_ablation_mcts/mcts_${obs}obs_stacked2_difficult
 
 done
 

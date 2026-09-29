@@ -20,7 +20,7 @@ n_z_levels: 3
 wall_thickness: 0.02
 friction: 1.2
 parallel_envs: 128
-viewer: always
+viewer: replay
 
 # Puzzle solver child process (null = wait indefinitely)
 puzzle_timeout_s: null

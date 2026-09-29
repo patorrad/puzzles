@@ -184,6 +184,10 @@ def _run_multi_episode(manifest_path: Path, out_dir: Path, cfg: DictConfig,
         world_cmd.append("--headless")
     if cfg.get("save_video", False):
         world_cmd.append("--save_video")
+        # Video capture needs the camera/replicator extensions, which IsaacLab
+        # only loads when explicitly requested — otherwise world.py's video
+        # setup silently no-ops ("No module named 'omni.replicator'").
+        world_cmd.append("--enable_cameras")
 
     with open(manifest_path) as f:
         episodes = json.load(f)["episodes"]

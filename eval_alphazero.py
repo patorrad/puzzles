@@ -48,7 +48,7 @@ def main(cfg: DictConfig) -> None:
     from alphazero.selfplay import SelfPlayConfig
 
     logger.info('Loading checkpoint: %s', cfg.checkpoint)
-    solver_net, stacker_net, spec = load_checkpoint(cfg.checkpoint)
+    solver_net, stacker_net, spec, use_cell_onehot = load_checkpoint(cfg.checkpoint)
     solver_net.to(cfg.device); stacker_net.to(cfg.device)
 
     logger.info('Building env (%s): n_obstacles=%d parallel_envs=%d',
@@ -56,6 +56,7 @@ def main(cfg: DictConfig) -> None:
     env = build_env(cfg, n_envs=cfg.parallel_envs, viewer_mode=cfg.viewer)
 
     sp_cfg = SelfPlayConfig(**dict(cfg.selfplay))
+    sp_cfg.use_cell_onehot = use_cell_onehot  # must match how the checkpoint was trained
     render = bool(cfg.get('view', False))
     pause = render and bool(cfg.get('pause_between_eps', True))
 
